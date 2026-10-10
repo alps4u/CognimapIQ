@@ -107,13 +107,6 @@ def fit_model(df_year: pd.DataFrame, year: int) -> ModelFit | None:
     )
 
 
-def data_driven_weights(fit: ModelFit | None) -> dict[str, float]:
-    """Composite weights proportional to positive standardised coefficients."""
-    if fit is None:
-        return normalize_weights({})
-    return normalize_weights({m: max(b, 0.0) for m, b in fit.std_beta.items()})
-
-
 def add_model_outputs(df: pd.DataFrame, fit: ModelFit | None) -> pd.DataFrame:
     out = df.copy()
     if fit is None:

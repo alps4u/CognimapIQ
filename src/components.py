@@ -10,11 +10,13 @@ import plotly.graph_objects as go
 import pydeck as pdk
 import streamlit as st
 
+from src import data_loader as dl
 from src.config import (
     ALL_MEASURES,
+    COGNITION_RAMP,
     COMPOSITE,
     COMPOSITE_LABEL,
-    DIVERGING_RAMP,
+    COMPOSITE_SHORT,
     DOMAIN_COLORS,
     GRIDLINE,
     INK_MUTED,
@@ -23,21 +25,24 @@ from src.config import (
     MEASURE_COLORS,
     MEASURE_DESCRIPTIONS,
     MEASURE_LABELS,
+    NEUTRAL_FILL,
     NO_DATA_COLOR,
     OUTCOME_MEASURE,
+    OVERLAY_STYLES,
+    PATTERN_SPACING_PX,
     POLICY_EVENTS,
     SENSORY_MEASURES,
     SEQUENTIAL_RAMP,
-    VALUE_TYPES,
 )
 from src.model import ModelFit, ScenarioResult
 
 RESIDUAL = "residual"
-MAP_METRICS = {
-    COMPOSITE: COMPOSITE_LABEL,
-    OUTCOME_MEASURE: MEASURE_LABELS[OUTCOME_MEASURE],
-    **{m: MEASURE_LABELS[m] for m in SENSORY_MEASURES},
-    RESIDUAL: "Cognitive decline vs. expected (model residual)",
+MAP_MODES = {"sori": COMPOSITE_LABEL, "overlay": "Cognitive & sensory overlay"}
+OVERLAY_HINTS = {
+    "COGNITION": "blue fill",
+    "VISION": "red ╱ hatch",
+    "HEARING": "purple ╲ hatch",
+    "TEETHLOST": "black dots",
 }
 
 
@@ -46,12 +51,12 @@ MAP_METRICS = {
 # --------------------------------------------------------------------------- #
 @dataclass
 class Controls:
-    value_type: str
     states: list[str]
-    min_adults: int
     weight_mode: str
     custom_weights: dict[str, float]
-    map_metric: str
+    map_mode: str
+    overlays: list[str]
+    threshold: int
 
 
 def render_sidebar(states: pd.DataFrame) -> Controls:
@@ -66,52 +71,44 @@ def render_sidebar(states: pd.DataFrame) -> Controls:
         format_func=lambda s: labels[s],
         placeholder="All states",
     )
-    min_adults = sb.select_slider(
-        "Minimum adult population",
-        options=[0, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000],
-        value=0,
-        format_func=lambda v: f"{v:,}",
-        help="Small counties carry wider model-based uncertainty in PLACES estimates.",
-    )
 
     sb.subheader("Map layer")
-    map_metric = sb.radio(
-        "Indicator",
-        options=list(MAP_METRICS),
-        format_func=MAP_METRICS.get,
+    map_mode = sb.radio(
+        "Map view",
+        options=list(MAP_MODES),
+        format_func=MAP_MODES.get,
         label_visibility="collapsed",
     )
+    overlays: list[str] = []
+    threshold = 75
+    if map_mode == "overlay":
+        for m in [OUTCOME_MEASURE, *SENSORY_MEASURES]:
+            if sb.checkbox(f"{MEASURE_LABELS[m]} — {OVERLAY_HINTS[m]}", value=True, key=f"ov_{m}"):
+                overlays.append(m)
+        threshold = sb.slider(
+            "Pattern threshold (percentile)", 50, 95, 75, 5,
+            help="Hatching and dots mark counties at or above this percentile of each "
+                 "sensory measure, pooled across all years.",
+        )
 
-    sb.subheader("Composite Risk Score")
+    sb.subheader(COMPOSITE_LABEL)
     weight_mode = sb.radio(
         "Weighting",
-        ["Equal", "Data-driven", "Custom"],
+        ["Equal", "Custom"],
         horizontal=True,
-        help=(
-            "Equal: each sensory domain counts the same. Data-driven: weights follow "
-            "each domain's standardised association with cognitive decline in the "
-            "selected year. Custom: set policy weights yourself."
-        ),
+        help="Equal: each sensory domain counts the same. Custom: set policy weights yourself.",
     )
     custom = {m: 1.0 for m in SENSORY_MEASURES}
     if weight_mode == "Custom":
         for m in SENSORY_MEASURES:
             custom[m] = sb.slider(MEASURE_LABELS[m], 0.0, 1.0, 1.0, 0.05, key=f"w_{m}")
 
-    sb.subheader("Data")
-    value_type = sb.radio(
-        "Prevalence type",
-        list(VALUE_TYPES),
-        format_func=VALUE_TYPES.get,
-        help="Age-adjusted rates compare regions fairly despite different age structures.",
-    )
-
     sb.divider()
     sb.caption(
-        "Source: CDC PLACES county estimates (BRFSS small-area models), releases "
-        "2023–2025. TEETHLOST is biennial and carried forward to the following year."
+        "Source: CDC PLACES county estimates (BRFSS small-area models, age-adjusted), "
+        "releases 2023–2025. TEETHLOST is biennial and carried forward to the following year."
     )
-    return Controls(value_type, selected, min_adults, weight_mode, custom, map_metric)
+    return Controls(selected, weight_mode, custom, map_mode, overlays, threshold)
 
 
 # --------------------------------------------------------------------------- #
@@ -138,10 +135,10 @@ def render_kpis(stats: dict, prev: dict | None, region_label: str) -> None:
         help=f"{stats['adults'] / 1e6:,.1f} M adults in selection",
     )
     c[1].metric(
-        "Avg. Composite Risk Score", "–" if pd.isna(stats["score_mean"]) else f"{stats['score_mean']:.0f}",
+        f"Avg. {COMPOSITE_SHORT}", "–" if pd.isna(stats["score_mean"]) else f"{stats['score_mean']:.0f}",
         _delta(stats["score_mean"], prev and prev["score_mean"], ""),
         delta_color="inverse",
-        help="0–100 percentile of combined sensory burden, pooled across all years.",
+        help=f"{COMPOSITE_LABEL}: 0–100 percentile of combined sensory burden, pooled across all years.",
     )
     for col, m in zip(c[2:], [OUTCOME_MEASURE, *SENSORY_MEASURES]):
         col.metric(
@@ -161,20 +158,21 @@ def _hex_to_rgb(h: str, alpha: int = 255) -> list[int]:
 
 
 @st.cache_data(show_spinner=False)
-def color_breaks(values: tuple[float, ...], diverging: bool) -> list[float]:
+def color_breaks(values: tuple[float, ...], classes: int) -> list[float]:
     """Class breaks computed on the pooled (all-year) distribution so colours
     mean the same thing at every step of the time slider."""
     arr = np.asarray(values, dtype=float)
     arr = arr[~np.isnan(arr)]
     if arr.size == 0:
         return []
-    if diverging:
-        half = (len(DIVERGING_RAMP) - 1) // 2
-        q = np.quantile(np.abs(arr), np.linspace(0, 1, half + 2)[1:-1])
-        q = np.maximum.accumulate(np.maximum(q, 1e-6))
-        return [*(-q[::-1]), *q]
-    k = len(SEQUENTIAL_RAMP)
-    return list(np.quantile(arr, np.linspace(0, 1, k + 1)[1:-1]))
+    return list(np.quantile(arr, np.linspace(0, 1, classes + 1)[1:-1]))
+
+
+@st.cache_data(show_spinner=False)
+def percentile_cutoff(values: tuple[float, ...], pct: int) -> float:
+    arr = np.asarray(values, dtype=float)
+    arr = arr[~np.isnan(arr)]
+    return float(np.percentile(arr, pct)) if arr.size else float("nan")
 
 
 def _classify(v: float, breaks: list[float], ramp: list[str]) -> str:
@@ -188,19 +186,19 @@ def _fmt_metric(metric: str, v: float) -> str:
         return "no data"
     if metric == COMPOSITE:
         return f"{v:.0f}"
-    if metric == RESIDUAL:
-        return f"{v:+.1f} pp"
     return f"{v:.1f}%"
 
 
 def build_map_features(
     geojson: dict,
     year_df: pd.DataFrame,
-    metric: str,
+    fill_metric: str | None,
     breaks: list[float],
+    ramp: list[str],
     selected_fips: set[str],
 ) -> list[dict]:
-    ramp = DIVERGING_RAMP if metric == RESIDUAL else SEQUENTIAL_RAMP
+    """County polygons with fill colour and tooltip text. `fill_metric=None`
+    draws a neutral base so pattern overlays read on their own."""
     rows = year_df.set_index("fips")
     features = []
     for feat in geojson["features"]:
@@ -209,28 +207,26 @@ def build_map_features(
         if fips in rows.index:
             r = rows.loc[fips]
             in_sel = fips in selected_fips
-            color = _classify(r.get(metric), breaks, ramp)
+            color = _classify(r.get(fill_metric), breaks, ramp) if fill_metric else NEUTRAL_FILL
             props.update(
                 name=f"{r['county']}, {r['state']}",
                 fill=_hex_to_rgb(color, 235 if in_sel else 55),
-                metric_txt=_fmt_metric(metric, r.get(metric)),
                 score_txt=_fmt_metric(COMPOSITE, r.get(COMPOSITE)),
                 tier=r.get("risk_tier") or "–",
                 **{f"{m}_txt": _fmt_metric(m, r.get(m)) for m in ALL_MEASURES},
-                resid_txt=_fmt_metric(RESIDUAL, r.get(RESIDUAL)),
                 adults=f"{int(r['adult_population']):,}" if pd.notna(r["adult_population"]) else "–",
             )
         else:
             props.update(
                 fill=_hex_to_rgb(NO_DATA_COLOR, 120),
-                metric_txt="no data", score_txt="–", tier="–", resid_txt="–", adults="–",
+                score_txt="–", tier="–", adults="–",
                 **{f"{m}_txt": "–" for m in ALL_MEASURES},
             )
         features.append({"type": "Feature", "geometry": feat["geometry"], "properties": props})
     return features
 
 
-def _view_state(year_df: pd.DataFrame, selected_fips: set[str], filtered: bool) -> pdk.ViewState:
+def view_state(year_df: pd.DataFrame, selected_fips: set[str], filtered: bool) -> pdk.ViewState:
     if filtered and selected_fips:
         sel = year_df[year_df["fips"].isin(selected_fips)]
         lat_min, lat_max = sel["lat"].min(), sel["lat"].max()
@@ -246,27 +242,17 @@ def _view_state(year_df: pd.DataFrame, selected_fips: set[str], filtered: bool) 
 TOOLTIP_HTML = (
     "<div style='font-family:system-ui,sans-serif;font-size:12px;line-height:1.45'>"
     "<b style='font-size:13px'>{name}</b><br/>"
-    "<b>{metric_label}:</b> {metric_txt}<br/>"
+    + COMPOSITE_SHORT + ": <b>{score_txt}</b> ({tier})<br/>"
     "<hr style='margin:4px 0;border:0;border-top:1px solid #ddd'/>"
-    "Composite Risk Score: <b>{score_txt}</b> ({tier})<br/>"
-    "Cognitive decline: {COGNITION_txt} · vs expected {resid_txt}<br/>"
+    "Cognitive decline: <b>{COGNITION_txt}</b><br/>"
     "Vision: {VISION_txt} · Hearing: {HEARING_txt}<br/>"
     "Complete tooth loss (65+): {TEETHLOST_txt}<br/>"
     "Adults: {adults}</div>"
 )
 
 
-def render_map(
-    geojson: dict,
-    year_df: pd.DataFrame,
-    metric: str,
-    breaks: list[float],
-    selected_fips: set[str],
-    filtered: bool,
-    key: str = "risk_map",
-) -> None:
-    features = build_map_features(geojson, year_df, metric, breaks, selected_fips)
-    layer = pdk.Layer(
+def _county_layer(features: list[dict]) -> pdk.Layer:
+    return pdk.Layer(
         "GeoJsonLayer",
         data={"type": "FeatureCollection", "features": features},
         id="counties",
@@ -280,27 +266,135 @@ def render_map(
         highlight_color=[11, 11, 11, 70],
         transitions={"getFillColor": 700},
     )
+
+
+def pattern_layers(
+    year_df: pd.DataFrame,
+    overlays: list[str],
+    cutoffs: dict[str, float],
+    selected_fips: set[str],
+    zoom: float,
+) -> list[pdk.Layer]:
+    """Hatch / dot layers for counties at or above each measure's cutoff."""
+    spacing = dl.pattern_spacing_m(zoom, PATTERN_SPACING_PX)
+    in_sel = year_df[year_df["fips"].isin(selected_fips)]
+    layers = []
+    for m in overlays:
+        if m not in OVERLAY_STYLES:
+            continue
+        fips = tuple(sorted(in_sel.loc[in_sel[m] >= cutoffs[m], "fips"]))
+        if not fips:
+            continue
+        style = OVERLAY_STYLES[m]
+        if style["pattern"] == "dots":
+            layers.append(pdk.Layer(
+                "ScatterplotLayer", data=dl.dot_points(fips, spacing), id=f"pattern_{m}",
+                get_position=["lon", "lat"], get_fill_color=_hex_to_rgb(style["color"]),
+                get_radius=1.6, radius_units="pixels", radius_min_pixels=1.2,
+                radius_max_pixels=1.8, stroked=False, pickable=False,
+            ))
+        else:
+            layers.append(pdk.Layer(
+                "PathLayer", data=dl.hatch_paths(fips, spacing, style["pattern"]), id=f"pattern_{m}",
+                get_path="path", get_color=_hex_to_rgb(style["color"]),
+                get_width=1.4, width_units="pixels", width_min_pixels=1,
+                width_max_pixels=1.6, cap_rounded=True, pickable=False,
+            ))
+    return layers
+
+
+def render_map(layers: list[pdk.Layer], view: pdk.ViewState, key: str = "risk_map") -> None:
     deck = pdk.Deck(
-        layers=[layer],
-        initial_view_state=_view_state(year_df, selected_fips, filtered),
+        layers=layers,
+        initial_view_state=view,
         map_provider="carto",
         map_style="light",
         tooltip={
-            "html": TOOLTIP_HTML.replace("{metric_label}", MAP_METRICS[metric]),
+            "html": TOOLTIP_HTML,
             "style": {"backgroundColor": "white", "color": INK_PRIMARY, "border": "1px solid #ccc"},
         },
     )
     st.pydeck_chart(deck, height=560, key=key)
 
 
-def render_legend(metric: str, breaks: list[float]) -> None:
+def render_sori_map(
+    geojson: dict, year_df: pd.DataFrame, panel: pd.DataFrame,
+    selected_fips: set[str], filtered: bool,
+) -> None:
+    breaks = color_breaks(tuple(panel[COMPOSITE].astype(float)), len(SEQUENTIAL_RAMP))
+    features = build_map_features(geojson, year_df, COMPOSITE, breaks, SEQUENTIAL_RAMP, selected_fips)
+    render_map([_county_layer(features)], view_state(year_df, selected_fips, filtered))
+    _ramp_legend(SEQUENTIAL_RAMP, breaks, lambda v: f"{v:.0f}", COMPOSITE_LABEL)
+    st.markdown(
+        f"<div style='font-size:11px;color:{INK_MUTED}'>Classes are pooled quantiles across all "
+        "years, so colour shifts over time reflect real change. Gray: no estimate.</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_overlay_map(
+    geojson: dict, year_df: pd.DataFrame, panel: pd.DataFrame,
+    selected_fips: set[str], filtered: bool, overlays: list[str], threshold: int,
+) -> None:
+    show_cog = OUTCOME_MEASURE in overlays
+    breaks = (
+        color_breaks(tuple(panel[OUTCOME_MEASURE].astype(float)), len(COGNITION_RAMP))
+        if show_cog else []
+    )
+    features = build_map_features(
+        geojson, year_df, OUTCOME_MEASURE if show_cog else None, breaks, COGNITION_RAMP, selected_fips
+    )
+    view = view_state(year_df, selected_fips, filtered)
+    cutoffs = {
+        m: percentile_cutoff(tuple(panel[m].astype(float)), threshold) for m in SENSORY_MEASURES
+    }
+    layers = [_county_layer(features), *pattern_layers(year_df, overlays, cutoffs, selected_fips, view.zoom)]
+    render_map(layers, view)
+
+    if show_cog:
+        _ramp_legend(COGNITION_RAMP, breaks, lambda v: f"{v:.1f}%",
+                     f"{MEASURE_LABELS[OUTCOME_MEASURE]} (blue fill)")
+    items = [
+        "<span style='display:inline-flex;align-items:center;gap:6px;margin-right:18px'>"
+        f"{_pattern_swatch(m)}<span>{MEASURE_LABELS[m]} ≥ {cutoffs[m]:.1f}%</span></span>"
+        for m in SENSORY_MEASURES if m in overlays
+    ]
+    if items:
+        st.markdown(
+            f"<div style='font-size:12px;color:{INK_SECONDARY};margin:8px 0 2px'>{''.join(items)}</div>"
+            f"<div style='font-size:11px;color:{INK_MUTED}'>Patterns mark counties at or above the "
+            f"{threshold}th percentile of each measure (pooled across years). Gray: no estimate.</div>",
+            unsafe_allow_html=True,
+        )
+
+
+def _pattern_swatch(measure: str) -> str:
+    style = OVERLAY_STYLES[measure]
+    c = style["color"]
+    if style["pattern"] == "dots":
+        body = "".join(
+            f"<circle cx='{x}' cy='{y}' r='1.6' fill='{c}'/>"
+            for x, y in [(4, 4), (12, 4), (8, 10), (4, 16), (12, 16), (16, 10)]
+        )
+    elif style["pattern"] == "ne":
+        body = "".join(
+            f"<line x1='{o}' y1='20' x2='{o + 20}' y2='0' stroke='{c}' stroke-width='1.6'/>"
+            for o in (-14, -7, 0, 7, 14)
+        )
+    else:
+        body = "".join(
+            f"<line x1='{o}' y1='0' x2='{o + 20}' y2='20' stroke='{c}' stroke-width='1.6'/>"
+            for o in (-14, -7, 0, 7, 14)
+        )
+    return (
+        "<svg width='20' height='20' viewBox='0 0 20 20' style='border:1px solid #c3c2b7;"
+        f"border-radius:3px;background:#fff;overflow:hidden'>{body}</svg>"
+    )
+
+
+def _ramp_legend(ramp: list[str], breaks: list[float], fmt, title: str) -> None:
     if not breaks:
         return
-    diverging = metric == RESIDUAL
-    ramp = DIVERGING_RAMP if diverging else SEQUENTIAL_RAMP
-    fmt = (lambda v: f"{v:+.1f}") if diverging else (
-        (lambda v: f"{v:.0f}") if metric == COMPOSITE else (lambda v: f"{v:.1f}%")
-    )
     labels = [f"< {fmt(breaks[0])}"]
     labels += [f"{fmt(a)} – {fmt(b)}" for a, b in zip(breaks[:-1], breaks[1:])]
     labels += [f"≥ {fmt(breaks[-1])}"]
@@ -310,14 +404,9 @@ def render_legend(metric: str, breaks: list[float]) -> None:
         f"margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>{lab}</div></div>"
         for c, lab in zip(ramp, labels)
     )
-    note = (
-        "Blue: lower cognitive decline than sensory burden predicts · Red: higher than predicted (pp)"
-        if diverging
-        else "Classes are pooled quantiles across all years, so colour shifts over time reflect real change."
-    )
     st.markdown(
-        f"<div style='display:flex;gap:4px;margin:4px 0 2px'>{swatches}</div>"
-        f"<div style='font-size:11px;color:{INK_MUTED}'>{note} Gray: no estimate.</div>",
+        f"<div style='font-size:12px;color:{INK_SECONDARY};margin-top:4px'>{title}</div>"
+        f"<div style='display:flex;gap:4px;margin:2px 0 2px'>{swatches}</div>",
         unsafe_allow_html=True,
     )
 
@@ -391,7 +480,7 @@ def trend_chart(trend: pd.DataFrame, current_year: int, title: str) -> go.Figure
 
 
 def score_trend_chart(panel: pd.DataFrame, fips: set[str], title: str) -> go.Figure:
-    """Distribution of the Composite Risk Score per year (median and IQR band)."""
+    """Distribution of the SORI per year (median and IQR band)."""
     d = panel[panel["fips"].isin(fips)] if fips else panel
     g = d.groupby("year")[COMPOSITE].quantile([0.25, 0.5, 0.75]).unstack().reset_index()
     x = [_year_to_date(y) for y in g["year"]]
@@ -430,7 +519,7 @@ def scatter_chart(df: pd.DataFrame, fit: ModelFit | None) -> go.Figure:
             marker=dict(size=8, color=MEASURE_COLORS["VISION"], opacity=0.55,
                         line=dict(color="white", width=1)),
             text=d["county"] + ", " + d["state"],
-            hovertemplate="<b>%{text}</b><br>Composite Risk Score %{x:.0f}<br>"
+            hovertemplate="<b>%{text}</b><br>" + COMPOSITE_SHORT + " %{x:.0f}<br>"
                           "Cognitive decline %{y:.1f}%<extra></extra>",
             showlegend=False,
         )
@@ -445,7 +534,7 @@ def scatter_chart(df: pd.DataFrame, fit: ModelFit | None) -> go.Figure:
     r = d[[COMPOSITE, OUTCOME_MEASURE]].corr().iloc[0, 1] if len(d) > 2 else float("nan")
     _base_layout(
         fig, height=400,
-        title=dict(text=f"Composite Risk Score vs. cognitive decline (r = {r:.2f}, n = {len(d):,})",
+        title=dict(text=f"{COMPOSITE_LABEL} vs. cognitive decline (r = {r:.2f}, n = {len(d):,})",
                    font=dict(size=14, color=INK_PRIMARY), x=0, y=0.98),
         xaxis=dict(title=COMPOSITE_LABEL, range=[0, 100]),
         yaxis=dict(title="Cognitive decline prevalence (%)"),
@@ -542,7 +631,7 @@ def render_scenario(result: ScenarioResult | None) -> None:
 
 
 def render_priority_table(df: pd.DataFrame, top_n: int) -> pd.DataFrame:
-    cols = ["county", "state", COMPOSITE, "risk_tier", "intervention_window",
+    cols = ["county", "state", COMPOSITE, "risk_tier",
             *SENSORY_MEASURES, OUTCOME_MEASURE, "predicted_cognition", RESIDUAL, "adult_population"]
     table = (
         df.dropna(subset=[COMPOSITE])
@@ -550,7 +639,7 @@ def render_priority_table(df: pd.DataFrame, top_n: int) -> pd.DataFrame:
         .head(top_n)[cols]
         .rename(columns={
             "county": "County", "state": "State", COMPOSITE: COMPOSITE_LABEL,
-            "risk_tier": "Tier", "intervention_window": "Intervention window",
+            "risk_tier": "Tier",
             **{m: MEASURE_LABELS[m] for m in ALL_MEASURES},
             "predicted_cognition": "Expected cognitive decline",
             RESIDUAL: "Observed − expected (pp)", "adult_population": "Adults",
@@ -561,11 +650,6 @@ def render_priority_table(df: pd.DataFrame, top_n: int) -> pd.DataFrame:
         table, hide_index=True, width="stretch", height=520,
         column_config={
             COMPOSITE_LABEL: st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f"),
-            "Intervention window": st.column_config.CheckboxColumn(
-                help="High sensory burden (score ≥ 75) while cognitive decline is still at or "
-                     "below the level the model expects — a window of opportunity for "
-                     "preventative care."
-            ),
             **{MEASURE_LABELS[m]: pct for m in ALL_MEASURES},
             "Expected cognitive decline": pct,
             "Observed − expected (pp)": st.column_config.NumberColumn(format="%+.1f"),

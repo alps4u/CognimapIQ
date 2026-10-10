@@ -29,13 +29,13 @@ MEASURE_DESCRIPTIONS = {
     "COGNITION": "Serious difficulty concentrating, remembering or making decisions (adults 18+).",
 }
 
-VALUE_TYPES = {
-    "AgeAdjPrv": "Age-adjusted prevalence",
-    "CrdPrv": "Crude prevalence",
-}
+# Age-adjusted rates compare regions fairly despite different age structures.
+VALUE_TYPE = "AgeAdjPrv"
+VALUE_TYPE_LABEL = "Age-adjusted prevalence"
 
 COMPOSITE = "COMPOSITE_RISK"
-COMPOSITE_LABEL = "Composite Risk Score"
+COMPOSITE_LABEL = "Composite Risk Score (SORI)"
+COMPOSITE_SHORT = "SORI"
 
 RISK_TIERS = [  # (lower bound on 0–100 score, label)
     (90, "Critical"),
@@ -44,14 +44,20 @@ RISK_TIERS = [  # (lower bound on 0–100 score, label)
     (0, "Baseline"),
 ]
 
-# Sequential blue ramp (light -> dark) for magnitude; diverging blue <-> red with
-# neutral gray midpoint for model residuals (observed minus expected).
+# Sequential blue ramp (light -> dark) for magnitude.
 SEQUENTIAL_RAMP = [
     "#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b",
 ]
-DIVERGING_RAMP = [
-    "#256abf", "#6da7ec", "#b7d3f6", "#f0efec", "#f4b8b4", "#e66767", "#c22f2f",
-]
+# Overlay view: cognitive decline as a lighter blue fill (so patterns stay
+# legible on top), sensory measures as hatching / dots.
+COGNITION_RAMP = ["#e3eefc", "#b7d3f6", "#86b6ef", "#5598e7", "#2a78d6"]
+NEUTRAL_FILL = "#f4f3ef"
+OVERLAY_STYLES = {
+    "VISION": {"pattern": "ne", "color": "#d62828"},       # red, rising to upper right
+    "HEARING": {"pattern": "nw", "color": "#7b2cbf"},      # purple, rising to upper left
+    "TEETHLOST": {"pattern": "dots", "color": "#0b0b0b"},  # black dots
+}
+PATTERN_SPACING_PX = 7
 NO_DATA_COLOR = "#d9d8d2"
 
 # Fixed categorical order (identity follows the measure, never its rank).
