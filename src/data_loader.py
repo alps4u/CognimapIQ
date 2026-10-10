@@ -86,6 +86,24 @@ def year_geometry(year: int) -> gpd.GeoDataFrame:
 
 
 @st.cache_data(show_spinner=False)
+def selection_bounds(fips: tuple[str, ...]) -> tuple[float, float, float, float] | None:
+    """(min_lon, min_lat, max_lon, max_lat) of the selected counties' boundaries.
+
+    Longitudes are unwrapped across the antimeridian (Alaska's Aleutians) so the
+    extent stays compact; min_lon may then exceed 180.
+    """
+    gdf = load_counties()
+    sel = gdf[gdf["fips"].isin(fips)]
+    if sel.empty:
+        return None
+    coords = sel.geometry.get_coordinates()
+    lon, lat = coords["x"].to_numpy(), coords["y"].to_numpy()
+    if lon.max() - lon.min() > 180:
+        lon = np.where(lon < 0, lon + 360, lon)
+    return float(lon.min()), float(lat.min()), float(lon.max()), float(lat.max())
+
+
+@st.cache_data(show_spinner=False)
 def year_geojson(year: int) -> dict:
     """Year geometry as a plain GeoJSON dict (computed once per year)."""
     return json.loads(year_geometry(year).to_json(drop_id=True))
@@ -104,7 +122,7 @@ def pattern_spacing_m(zoom: float, px: float) -> float:
     Quantised to half zoom levels so cached geometry is reused.
     """
     z = round(zoom * 2) / 2
-    return px * _MERCATOR_WORLD_M / (256 * 2**z)
+    return px * _MERCATOR_WORLD_M / (512 * 2**z)  # deck.gl world is 512 px at zoom 0
 
 
 @st.cache_data(show_spinner=False)

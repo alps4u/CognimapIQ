@@ -19,18 +19,18 @@ streamlit run app.py
 
 | View | What it shows |
 |---|---|
-| **Spatial risk map** (primary) | Two Pydeck/WebGL views. **Composite Risk Score (SORI)** shows a county choropleth. **Cognitive & sensory overlay** stacks layers you pick with checkboxes: cognitive decline as a blue fill, vision as red hatching rising to the upper right, hearing as purple hatching rising to the upper left, and complete tooth loss as black dots. Colour classes are pooled across years, so colour changes over time reflect real change. |
+| **Spatial risk map** (primary) | Two Pydeck/WebGL views. **Sensory Organ Risk Index (SORI)** shows a county choropleth. **Cognitive & sensory overlay** stacks layers you pick with checkboxes: cognitive decline as a blue fill, vision as red hatching rising to the upper right, hearing as purple hatching rising to the upper left, and complete tooth loss as black dots. Patterns mark counties at or above the 75th percentile of each measure. Colour classes are pooled across years, so colour changes over time reflect real change. |
 | **Longitudinal & policy view** (secondary) | A year time slider with ▶ playback and animated colour transitions. Trend lines are marked with numbered policy and evidence milestones, alongside the score distribution over time and the counties whose score rose the most. |
 | **Predictive analytics** | An association model, Cognition ~ Vision + Hearing + Tooth loss (R², coefficients, standardised β), plus a preventative-care scenario that estimates how many adults with cognitive difficulty might be averted. |
 | **Priority regions** | A ranked list of counties for intervention, with a CSV export. |
 
-Sidebar controls: health region (state), map view and overlay layers (with a percentile threshold for the patterns), and SORI weighting (equal or custom). All rates are age-adjusted prevalence.
+Sidebar controls: health region (state), map view and overlay layers, and SORI weighting (equal or custom). All rates are age-adjusted prevalence.
 
 ## Methodology
 
 - **Measures:** `VISION`, `HEARING` and `TEETHLOST` (complete tooth loss in adults 65+, used as a mastication proxy) are the sensory measures. `COGNITION` is the outcome.
 - **Years:** 2021–2023 BRFSS survey years, taken from the PLACES 2023–2025 releases. `TEETHLOST` is only surveyed every two years, so the most recent value is carried forward.
-- **Composite Risk Score (SORI, 0–100):** each sensory measure is converted to a z-score using all years together. The z-scores are combined as a weighted average, and that average is turned into a percentile rank across all years. Because of this, scores can be compared from one year to the next.
+- **Sensory Organ Risk Index (SORI, 0–100):** each sensory measure is converted to a z-score using all years together. The z-scores are combined as a weighted average, and that average is turned into a percentile rank across all years. Because of this, scores can be compared from one year to the next.
 - **Caveat:** these are ecological, cross-sectional associations between counties. They are meant for prioritising regions, not for estimating causal effects on individuals.
 
 ## Project layout

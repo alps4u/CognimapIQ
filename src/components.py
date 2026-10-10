@@ -29,6 +29,7 @@ from src.config import (
     NO_DATA_COLOR,
     OUTCOME_MEASURE,
     OVERLAY_STYLES,
+    PATTERN_PERCENTILE,
     PATTERN_SPACING_PX,
     POLICY_EVENTS,
     SENSORY_MEASURES,
@@ -56,7 +57,6 @@ class Controls:
     custom_weights: dict[str, float]
     map_mode: str
     overlays: list[str]
-    threshold: int
 
 
 def render_sidebar(states: pd.DataFrame) -> Controls:
@@ -80,16 +80,10 @@ def render_sidebar(states: pd.DataFrame) -> Controls:
         label_visibility="collapsed",
     )
     overlays: list[str] = []
-    threshold = 75
     if map_mode == "overlay":
         for m in [OUTCOME_MEASURE, *SENSORY_MEASURES]:
             if sb.checkbox(f"{MEASURE_LABELS[m]} — {OVERLAY_HINTS[m]}", value=True, key=f"ov_{m}"):
                 overlays.append(m)
-        threshold = sb.slider(
-            "Pattern threshold (percentile)", 50, 95, 75, 5,
-            help="Hatching and dots mark counties at or above this percentile of each "
-                 "sensory measure, pooled across all years.",
-        )
 
     sb.subheader(COMPOSITE_LABEL)
     weight_mode = sb.radio(
@@ -108,7 +102,7 @@ def render_sidebar(states: pd.DataFrame) -> Controls:
         "Source: CDC PLACES county estimates (BRFSS small-area models, age-adjusted), "
         "releases 2023–2025. TEETHLOST is biennial and carried forward to the following year."
     )
-    return Controls(selected, weight_mode, custom, map_mode, overlays, threshold)
+    return Controls(selected, weight_mode, custom, map_mode, overlays)
 
 
 # --------------------------------------------------------------------------- #
@@ -226,17 +220,38 @@ def build_map_features(
     return features
 
 
-def view_state(year_df: pd.DataFrame, selected_fips: set[str], filtered: bool) -> pdk.ViewState:
-    if filtered and selected_fips:
-        sel = year_df[year_df["fips"].isin(selected_fips)]
-        lat_min, lat_max = sel["lat"].min(), sel["lat"].max()
-        lon_min, lon_max = sel["lon"].min(), sel["lon"].max()
-        span = max(lat_max - lat_min, (lon_max - lon_min) * 0.6, 1.0)
-        zoom = float(np.clip(np.log2(170 / span) - 0.6, 3, 9))
-        return pdk.ViewState(
-            latitude=(lat_min + lat_max) / 2, longitude=(lon_min + lon_max) / 2, zoom=zoom
-        )
-    return pdk.ViewState(latitude=38.5, longitude=-96.5, zoom=3.3)
+DECK_WORLD_PX = 512  # deck.gl world size at zoom 0
+MAP_HEIGHT_PX = 560
+MAP_WIDTH_PX = 1100  # approximate main-column width on a wide layout
+US_VIEW = pdk.ViewState(latitude=38.5, longitude=-96.5, zoom=3.3)
+
+
+def _mercator_y(lat: float) -> float:
+    """Web Mercator y in deck.gl world pixels at zoom 0 (0 at the top, 512 at the bottom)."""
+    phi = np.radians(np.clip(lat, -85.05, 85.05))
+    return 256 * (1 - np.log(np.tan(np.pi / 4 + phi / 2)) / np.pi)
+
+
+def view_state(selected_fips: set[str], filtered: bool, padding: float = 0.08) -> pdk.ViewState:
+    """Fit the map to the selected states' boundaries; whole US otherwise."""
+    if not (filtered and selected_fips):
+        return US_VIEW
+    bounds = dl.selection_bounds(tuple(sorted(selected_fips)))
+    if bounds is None:
+        return US_VIEW
+    min_lon, min_lat, max_lon, max_lat = bounds
+    dx = (max_lon - min_lon) / 360 * DECK_WORLD_PX
+    y_top, y_bottom = _mercator_y(max_lat), _mercator_y(min_lat)
+    dy = y_bottom - y_top
+    usable_w = MAP_WIDTH_PX * (1 - 2 * padding)
+    usable_h = MAP_HEIGHT_PX * (1 - 2 * padding)
+    zoom = np.log2(min(usable_w / max(dx, 1e-6), usable_h / max(dy, 1e-6)))
+    center_y = (y_top + y_bottom) / 2
+    center_lat = float(np.degrees(2 * np.arctan(np.exp(np.pi * (1 - center_y / 256))) - np.pi / 2))
+    center_lon = (min_lon + max_lon) / 2
+    if center_lon > 180:
+        center_lon -= 360
+    return pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=float(np.clip(zoom, 2.5, 11)))
 
 
 TOOLTIP_HTML = (
@@ -290,15 +305,15 @@ def pattern_layers(
             layers.append(pdk.Layer(
                 "ScatterplotLayer", data=dl.dot_points(fips, spacing), id=f"pattern_{m}",
                 get_position=["lon", "lat"], get_fill_color=_hex_to_rgb(style["color"]),
-                get_radius=1.6, radius_units="pixels", radius_min_pixels=1.2,
-                radius_max_pixels=1.8, stroked=False, pickable=False,
+                get_radius=0.7, radius_units="pixels", radius_min_pixels=0.6,
+                radius_max_pixels=0.9, stroked=False, pickable=False,
             ))
         else:
             layers.append(pdk.Layer(
                 "PathLayer", data=dl.hatch_paths(fips, spacing, style["pattern"]), id=f"pattern_{m}",
                 get_path="path", get_color=_hex_to_rgb(style["color"]),
-                get_width=1.4, width_units="pixels", width_min_pixels=1,
-                width_max_pixels=1.6, cap_rounded=True, pickable=False,
+                get_width=0.5, width_units="pixels", width_min_pixels=0.4,
+                width_max_pixels=0.6, cap_rounded=True, pickable=False,
             ))
     return layers
 
@@ -314,7 +329,7 @@ def render_map(layers: list[pdk.Layer], view: pdk.ViewState, key: str = "risk_ma
             "style": {"backgroundColor": "white", "color": INK_PRIMARY, "border": "1px solid #ccc"},
         },
     )
-    st.pydeck_chart(deck, height=560, key=key)
+    st.pydeck_chart(deck, height=MAP_HEIGHT_PX, key=key)
 
 
 def render_sori_map(
@@ -323,7 +338,7 @@ def render_sori_map(
 ) -> None:
     breaks = color_breaks(tuple(panel[COMPOSITE].astype(float)), len(SEQUENTIAL_RAMP))
     features = build_map_features(geojson, year_df, COMPOSITE, breaks, SEQUENTIAL_RAMP, selected_fips)
-    render_map([_county_layer(features)], view_state(year_df, selected_fips, filtered))
+    render_map([_county_layer(features)], view_state(selected_fips, filtered))
     _ramp_legend(SEQUENTIAL_RAMP, breaks, lambda v: f"{v:.0f}", COMPOSITE_LABEL)
     st.markdown(
         f"<div style='font-size:11px;color:{INK_MUTED}'>Classes are pooled quantiles across all "
@@ -334,7 +349,7 @@ def render_sori_map(
 
 def render_overlay_map(
     geojson: dict, year_df: pd.DataFrame, panel: pd.DataFrame,
-    selected_fips: set[str], filtered: bool, overlays: list[str], threshold: int,
+    selected_fips: set[str], filtered: bool, overlays: list[str],
 ) -> None:
     show_cog = OUTCOME_MEASURE in overlays
     breaks = (
@@ -344,9 +359,9 @@ def render_overlay_map(
     features = build_map_features(
         geojson, year_df, OUTCOME_MEASURE if show_cog else None, breaks, COGNITION_RAMP, selected_fips
     )
-    view = view_state(year_df, selected_fips, filtered)
+    view = view_state(selected_fips, filtered)
     cutoffs = {
-        m: percentile_cutoff(tuple(panel[m].astype(float)), threshold) for m in SENSORY_MEASURES
+        m: percentile_cutoff(tuple(panel[m].astype(float)), PATTERN_PERCENTILE) for m in SENSORY_MEASURES
     }
     layers = [_county_layer(features), *pattern_layers(year_df, overlays, cutoffs, selected_fips, view.zoom)]
     render_map(layers, view)
@@ -363,7 +378,7 @@ def render_overlay_map(
         st.markdown(
             f"<div style='font-size:12px;color:{INK_SECONDARY};margin:8px 0 2px'>{''.join(items)}</div>"
             f"<div style='font-size:11px;color:{INK_MUTED}'>Patterns mark counties at or above the "
-            f"{threshold}th percentile of each measure (pooled across years). Gray: no estimate.</div>",
+            f"{PATTERN_PERCENTILE}th percentile of each measure (pooled across years). Gray: no estimate.</div>",
             unsafe_allow_html=True,
         )
 

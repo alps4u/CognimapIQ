@@ -34,7 +34,7 @@ VALUE_TYPE = "AgeAdjPrv"
 VALUE_TYPE_LABEL = "Age-adjusted prevalence"
 
 COMPOSITE = "COMPOSITE_RISK"
-COMPOSITE_LABEL = "Composite Risk Score (SORI)"
+COMPOSITE_LABEL = "Sensory Organ Risk Index (SORI)"
 COMPOSITE_SHORT = "SORI"
 
 RISK_TIERS = [  # (lower bound on 0–100 score, label)
@@ -57,7 +57,9 @@ OVERLAY_STYLES = {
     "HEARING": {"pattern": "nw", "color": "#7b2cbf"},      # purple, rising to upper left
     "TEETHLOST": {"pattern": "dots", "color": "#0b0b0b"},  # black dots
 }
-PATTERN_SPACING_PX = 7
+PATTERN_SPACING_PX = 4
+# Patterns mark counties at or above this percentile of each sensory measure.
+PATTERN_PERCENTILE = 75
 NO_DATA_COLOR = "#d9d8d2"
 
 # Fixed categorical order (identity follows the measure, never its rank).

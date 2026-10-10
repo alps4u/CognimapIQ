@@ -148,7 +148,7 @@ with tab_map:
         if not controls.overlays:
             st.info("Select at least one layer in the sidebar.")
         ui.render_overlay_map(geojson, year_all, panel, selected_fips, filtered,
-                              controls.overlays, controls.threshold)
+                              controls.overlays)
     else:
         st.markdown(f"#### {COMPOSITE_LABEL} · {year}")
         ui.render_sori_map(geojson, year_all, panel, selected_fips, filtered)

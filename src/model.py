@@ -1,4 +1,4 @@
-"""In-memory analytics: Composite Risk Score, association model and scenarios.
+"""In-memory analytics: Sensory Organ Risk Index (SORI), association model and scenarios.
 
 All statistics here are ecological (county-level prevalence). They describe
 spatial association between sensory impairment and cognitive decline and are
@@ -17,7 +17,7 @@ from src.config import COMPOSITE, OUTCOME_MEASURE, RISK_TIERS, SENSORY_MEASURES
 
 
 # --------------------------------------------------------------------------- #
-# Composite Risk Score
+# Sensory Organ Risk Index (SORI)
 # --------------------------------------------------------------------------- #
 def normalize_weights(weights: dict[str, float]) -> dict[str, float]:
     clean = {m: max(float(weights.get(m, 0.0)), 0.0) for m in SENSORY_MEASURES}
@@ -28,7 +28,7 @@ def normalize_weights(weights: dict[str, float]) -> dict[str, float]:
 
 
 def add_composite_score(panel: pd.DataFrame, weights: dict[str, float]) -> pd.DataFrame:
-    """Add z-scores, the weighted composite index and a 0–100 Composite Risk Score.
+    """Add z-scores, the weighted composite index and the 0–100 Sensory Organ Risk Index (SORI).
 
     Standardisation and percentile ranking are pooled across all years so a
     county's score is comparable over time (a rising score means its sensory
