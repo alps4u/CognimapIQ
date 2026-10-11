@@ -7,6 +7,7 @@ import json
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import requests
 import shapely
 import streamlit as st
 from pyproj import Transformer
@@ -16,6 +17,10 @@ from src.config import COUNTIES_PATH, CRS, PLACES_PATH
 
 class SnapshotMissingError(FileNotFoundError):
     """Raised when the pre-processed snapshot has not been built yet."""
+
+
+class GeocodeError(RuntimeError):
+    """Raised when the address geocoder cannot be reached or answers unexpectedly."""
 
 
 def _require(path) -> None:
@@ -104,9 +109,66 @@ def selection_bounds(fips: tuple[str, ...]) -> tuple[float, float, float, float]
 
 
 @st.cache_data(show_spinner=False)
+def selection_outline(fips: tuple[str, ...], year: int, by_state: bool) -> dict:
+    """Outline GeoJSON for highlighting a selection: the selected counties dissolved
+    into their states (`by_state`), or the county polygons themselves."""
+    gdf = year_geometry(year)
+    sel = gdf[gdf["fips"].isin(fips)]
+    if by_state:
+        # County edges don't meet exactly, so a plain dissolve leaves seam lines inside
+        # each state. Grow-union-shrink closes the gaps; dropping holes removes slivers.
+        eps = 0.005  # degrees (~500 m)
+        outlines = []
+        for _, g in gdf[gdf["statefp"].isin(sel["statefp"].unique())].groupby("statefp"):
+            merged = shapely.union_all(shapely.buffer(g.geometry.values, eps)).buffer(-eps)
+            outlines.append(shapely.MultiPolygon(
+                [shapely.Polygon(p.exterior) for p in _polygon_parts(merged) if not p.is_empty]
+            ).simplify(0.002))
+        sel = gpd.GeoDataFrame(geometry=outlines, crs=gdf.crs)
+    return json.loads(sel[["geometry"]].to_json(drop_id=True))
+
+
+@st.cache_data(show_spinner=False)
 def year_geojson(year: int) -> dict:
     """Year geometry as a plain GeoJSON dict (computed once per year)."""
     return json.loads(year_geometry(year).to_json(drop_id=True))
+
+
+# --------------------------------------------------------------------------- #
+# Address lookup
+# --------------------------------------------------------------------------- #
+GEOCODER_URL = "https://geocoding.geo.census.gov/geocoder/geographies/onelineaddress"
+
+
+@st.cache_data(show_spinner="Looking up address…", ttl=86_400, max_entries=256)
+def geocode_address(address: str, timeout: int = 20) -> dict | None:
+    """Resolve a US street address to its county via the US Census Geocoder.
+
+    Returns {matched_address, fips, county_name, lat, lon}, or None when no address matches.
+    """
+    params = {"address": address, "benchmark": "Public_AR_Current", "vintage": "Current_Current",
+              "layers": "Counties", "format": "json"}
+    try:
+        resp = requests.get(GEOCODER_URL, params=params, timeout=timeout)
+        resp.raise_for_status()
+        matches = resp.json()["result"]["addressMatches"]
+    except requests.RequestException as exc:
+        raise GeocodeError(f"Census geocoder unavailable ({exc.__class__.__name__}).") from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GeocodeError("Census geocoder returned an unexpected response.") from exc
+
+    for match in matches:
+        counties = (match.get("geographies") or {}).get("Counties") or []
+        if counties and counties[0].get("GEOID"):
+            coords = match.get("coordinates") or {}
+            return {
+                "matched_address": match.get("matchedAddress", address),
+                "fips": str(counties[0]["GEOID"]).zfill(5),
+                "county_name": counties[0].get("NAME", ""),
+                "lat": coords.get("y"),
+                "lon": coords.get("x"),
+            }
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -174,19 +236,29 @@ def hatch_paths(fips: tuple[str, ...], spacing: float, direction: str) -> list[d
 
 @st.cache_data(show_spinner=False, max_entries=64)
 def dot_points(fips: tuple[str, ...], spacing: float) -> pd.DataFrame:
-    """Staggered dot grid inside the given counties (EPSG:4326 lon/lat)."""
+    """Staggered dot grid inside the given counties (EPSG:4326 lon/lat).
+
+    A county smaller than the grid spacing gets one dot at its representative
+    point, so every highlighted county stays marked on wide views.
+    """
     gdf = _counties_mercator()
     xs_all, ys_all = [], []
     for geom in gdf.loc[gdf["fips"].isin(fips), "geometry"]:
+        n_dots = 0
         for part in _polygon_parts(geom):
             minx, miny, maxx, maxy = part.bounds
             ys = np.arange(np.floor(miny / spacing) * spacing, maxy + spacing, spacing)
-            for i, y in enumerate(ys):
+            for y in ys:
                 shift = spacing / 2 if round(y / spacing) % 2 else 0.0
                 xs = np.arange(np.floor(minx / spacing) * spacing + shift, maxx + spacing, spacing)
                 inside = shapely.contains_xy(part, xs, np.full_like(xs, y))
                 xs_all.append(xs[inside])
                 ys_all.append(np.full(inside.sum(), y))
+                n_dots += int(inside.sum())
+        if n_dots == 0:
+            pt = geom.representative_point()
+            xs_all.append(np.array([pt.x]))
+            ys_all.append(np.array([pt.y]))
     if not xs_all:
         return pd.DataFrame(columns=["lon", "lat"])
     to_wgs84 = Transformer.from_crs(WEB_MERCATOR, CRS, always_xy=True)

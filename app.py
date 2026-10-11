@@ -126,6 +126,10 @@ if controls.states:
 else:
     region_label = "United States (all counties)"
 
+ui.render_lookup_result(controls.lookup_slot, year_all, panel, year, controls.pattern_top_pct,
+                        selected_fips)
+pin = ui.lookup_pin(year_all)
+
 stats = model.summarize(year_df)
 prev_stats = model.summarize(prev_df) if prev_df is not None and len(prev_df) else None
 
@@ -143,15 +147,21 @@ tab_map, tab_time, tab_model, tab_table = st.tabs(
 # --------------------------------------------------------------------------- #
 with tab_map:
     geojson = dl.year_geojson(year)
+    # A looked-up address zooms to its state unless the user has chosen a region.
+    if pin and pin["state"] and not filtered:
+        view = ui.view_state(set(year_all.loc[year_all["state"] == pin["state"], "fips"]), True)
+    else:
+        view = ui.view_state(selected_fips, filtered)
+    highlight = ui.highlight_layers(year, selected_fips, filtered, pin)
     if controls.map_mode == "overlay":
         st.markdown(f"#### Cognitive & sensory overlay · {year}")
         if not controls.overlays:
             st.info("Select at least one layer in the sidebar.")
-        ui.render_overlay_map(geojson, year_all, panel, selected_fips, filtered,
-                              controls.overlays)
+        ui.render_overlay_map(geojson, year_all, panel, selected_fips, view,
+                              controls.overlays, controls.pattern_top_pct, pin, highlight)
     else:
         st.markdown(f"#### {COMPOSITE_LABEL} · {year}")
-        ui.render_sori_map(geojson, year_all, panel, selected_fips, filtered)
+        ui.render_sori_map(geojson, year_all, panel, selected_fips, view, pin, highlight)
 
     teeth_year = year_all["teethlost_source_year"].dropna()
     if len(teeth_year) and int(teeth_year.iloc[0]) != year:
@@ -258,6 +268,8 @@ st.caption(
     "Prototype (PoC) built on CDC PLACES as a stand-in for Canadian longitudinal data "
     "(CCHS, CLSA). Health-region boundaries will replace US counties after migration."
 )
+
+ui.install_tooltip_placement()
 
 # Continue timeline playback after the page has rendered.
 if st.session_state.get("playing"):

@@ -52,23 +52,38 @@ SEQUENTIAL_RAMP = [
 # legible on top), sensory measures as hatching / dots.
 COGNITION_RAMP = ["#e3eefc", "#b7d3f6", "#86b6ef", "#5598e7", "#2a78d6"]
 NEUTRAL_FILL = "#f4f3ef"
+# Stripe hues (ColorBrewer Dark2) stay distinct from each other and from the blue fill
+# under protan/deutan simulation.
 OVERLAY_STYLES = {
-    "VISION": {"pattern": "ne", "color": "#d62828"},       # red, rising to upper right
-    "HEARING": {"pattern": "nw", "color": "#7b2cbf"},      # purple, rising to upper left
+    "VISION": {"pattern": "ne", "color": "#d95f02"},       # orange, rising to upper right
+    "HEARING": {"pattern": "nw", "color": "#1b9e77"},      # teal, rising to upper left
     "TEETHLOST": {"pattern": "dots", "color": "#0b0b0b"},  # black dots
 }
-PATTERN_SPACING_PX = 4
-# Patterns mark counties at or above this percentile of each sensory measure.
-PATTERN_PERCENTILE = 75
+# Screen-space pattern geometry: 2 px stripes every 6 px; small dots on a staggered grid.
+PATTERN_SPACING_PX = 6
+PATTERN_LINE_PX = 2
+PATTERN_OPACITY = 0.95
+DOT_RADIUS_PX = 0.9
+# Dot spacing widens on wide views so dots stay legible and the point count stays bounded:
+# DOT_SPACING_PX[0] at DOT_SPACING_ZOOMS[0] (whole US) easing to [1] at [1] (state level).
+DOT_SPACING_PX = (7, 4)
+DOT_SPACING_ZOOMS = (3.5, 7.0)
+# Patterns mark counties in the top N% of each sensory measure (sidebar choice).
+PATTERN_TOP_SHARES = [10, 20, 25, 30, 50]
+PATTERN_TOP_DEFAULT = 25
+SAMPLE_ADDRESS = "360 Huntington Ave, Boston, MA 02115, United States"
 NO_DATA_COLOR = "#d9d8d2"
 
-# Fixed categorical order (identity follows the measure, never its rank).
+# Fixed categorical order (identity follows the measure, never its rank). Charts reuse the
+# overlay map's hues so a measure looks the same everywhere.
 MEASURE_COLORS = {
-    "VISION": "#2a78d6",
-    "HEARING": "#eb6834",
-    "TEETHLOST": "#1baf7a",
-    "COGNITION": "#eda100",
+    "VISION": OVERLAY_STYLES["VISION"]["color"],
+    "HEARING": OVERLAY_STYLES["HEARING"]["color"],
+    "TEETHLOST": OVERLAY_STYLES["TEETHLOST"]["color"],
+    "COGNITION": COGNITION_RAMP[-1],
 }
+# The composite index keeps the SORI map's navy.
+COMPOSITE_COLOR = SEQUENTIAL_RAMP[5]
 
 INK_PRIMARY = "#0b0b0b"
 INK_SECONDARY = "#52514e"

@@ -17,7 +17,11 @@ from src.config import (
     COMPOSITE,
     COMPOSITE_LABEL,
     COMPOSITE_SHORT,
+    COMPOSITE_COLOR,
     DOMAIN_COLORS,
+    DOT_RADIUS_PX,
+    DOT_SPACING_PX,
+    DOT_SPACING_ZOOMS,
     GRIDLINE,
     INK_MUTED,
     INK_PRIMARY,
@@ -29,9 +33,13 @@ from src.config import (
     NO_DATA_COLOR,
     OUTCOME_MEASURE,
     OVERLAY_STYLES,
-    PATTERN_PERCENTILE,
+    PATTERN_LINE_PX,
+    PATTERN_OPACITY,
     PATTERN_SPACING_PX,
+    PATTERN_TOP_DEFAULT,
+    PATTERN_TOP_SHARES,
     POLICY_EVENTS,
+    SAMPLE_ADDRESS,
     SENSORY_MEASURES,
     SEQUENTIAL_RAMP,
 )
@@ -41,9 +49,9 @@ RESIDUAL = "residual"
 MAP_MODES = {"sori": COMPOSITE_LABEL, "overlay": "Cognitive & sensory overlay"}
 OVERLAY_HINTS = {
     "COGNITION": "blue fill",
-    "VISION": "red ╱ hatch",
-    "HEARING": "purple ╲ hatch",
-    "TEETHLOST": "black dots",
+    "VISION": "orange ╱ hatch",
+    "HEARING": "teal ╲ hatch",
+    "TEETHLOST": "brown dots",
 }
 
 
@@ -57,6 +65,20 @@ class Controls:
     custom_weights: dict[str, float]
     map_mode: str
     overlays: list[str]
+    pattern_top_pct: int
+    lookup_slot: st.delta_generator.DeltaGenerator
+
+
+def _run_lookup() -> None:
+    address = st.session_state.get("lookup_address", "").strip()
+    if not address:
+        st.session_state.pop("lookup", None)
+        return
+    try:
+        match, error = dl.geocode_address(address), None
+    except dl.GeocodeError as exc:
+        match, error = None, str(exc)
+    st.session_state["lookup"] = {"match": match, "error": error}
 
 
 def render_sidebar(states: pd.DataFrame) -> Controls:
@@ -72,6 +94,16 @@ def render_sidebar(states: pd.DataFrame) -> Controls:
         placeholder="All states",
     )
 
+    sb.subheader("Address lookup")
+    with sb.form("address_lookup", border=False):
+        st.text_input(
+            "US street address", value=SAMPLE_ADDRESS, key="lookup_address",
+            placeholder=f"e.g. {SAMPLE_ADDRESS}",
+            help="Resolved to its county with the US Census Geocoder.",
+        )
+        st.form_submit_button("Find county", on_click=_run_lookup, width="stretch")
+    lookup_slot = sb.container()
+
     sb.subheader("Map layer")
     map_mode = sb.radio(
         "Map view",
@@ -84,6 +116,15 @@ def render_sidebar(states: pd.DataFrame) -> Controls:
         for m in [OUTCOME_MEASURE, *SENSORY_MEASURES]:
             if sb.checkbox(f"{MEASURE_LABELS[m]} — {OVERLAY_HINTS[m]}", value=True, key=f"ov_{m}"):
                 overlays.append(m)
+    pattern_top_pct = sb.select_slider(
+        "Pattern threshold (top %)",
+        options=PATTERN_TOP_SHARES,
+        value=PATTERN_TOP_DEFAULT,
+        format_func=lambda v: f"Top {v}%",
+        disabled=map_mode != "overlay",
+        help="Hatching / dots mark counties in this top share of each sensory measure "
+             "(pooled across years). Applies to the overlay view.",
+    )
 
     sb.subheader(COMPOSITE_LABEL)
     weight_mode = sb.radio(
@@ -102,7 +143,67 @@ def render_sidebar(states: pd.DataFrame) -> Controls:
         "Source: CDC PLACES county estimates (BRFSS small-area models, age-adjusted), "
         "releases 2023–2025. TEETHLOST is biennial and carried forward to the following year."
     )
-    return Controls(selected, weight_mode, custom, map_mode, overlays)
+    return Controls(selected, weight_mode, custom, map_mode, overlays, pattern_top_pct, lookup_slot)
+
+
+def lookup_pin(year_all: pd.DataFrame) -> dict | None:
+    """Map pin for the looked-up county, or None when there is no successful lookup."""
+    match = (st.session_state.get("lookup") or {}).get("match")
+    if not match or match["lat"] is None:
+        return None
+    row = year_all[year_all["fips"] == match["fips"]]
+    state = row["state"].iloc[0] if len(row) else None
+    return {"fips": match["fips"], "state": state, "lat": match["lat"], "lon": match["lon"]}
+
+
+def _ordinal(n: int) -> str:
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def render_lookup_result(
+    slot: st.delta_generator.DeltaGenerator, year_all: pd.DataFrame, panel: pd.DataFrame,
+    year: int, top_pct: int, selected_fips: set[str],
+) -> None:
+    """Sidebar card: where the looked-up county sits in the national distribution."""
+    lookup = st.session_state.get("lookup")
+    if not lookup:
+        return
+    with slot:
+        match = lookup["match"]
+        if lookup["error"]:
+            st.error(f"Address lookup failed: {lookup['error']}")
+        elif match is None:
+            st.warning("No match found. Include street, city and state.")
+        elif not (year_all["fips"] == match["fips"]).any():
+            st.warning(f"{match['county_name']} (FIPS {match['fips']}) has no PLACES estimate for {year}.")
+        else:
+            r = year_all.loc[year_all["fips"] == match["fips"]].iloc[0]
+            st.markdown(f"**{r['county']}, {r['state']}** · FIPS `{match['fips']}`")
+            st.caption(match["matched_address"])
+            score = r.get(COMPOSITE)
+            st.metric(
+                f"{COMPOSITE_SHORT} ({year})", "–" if pd.isna(score) else f"{score:.0f}",
+                r.get("risk_tier") or None, delta_color="off", delta_arrow="off",
+                help="0–100 percentile of combined sensory burden, pooled across all years.",
+            )
+            for m in [OUTCOME_MEASURE, *SENSORY_MEASURES]:
+                v = r.get(m)
+                if pd.isna(v):
+                    st.caption(f"{MEASURE_LABELS[m]}: no estimate")
+                    continue
+                pct = int(round((year_all[m].dropna() <= v).mean() * 100))
+                flag = ""
+                if m in SENSORY_MEASURES:
+                    cutoff = percentile_cutoff(tuple(panel[m].astype(float)), 100 - top_pct)
+                    flag = f" · top {top_pct}%" if v >= cutoff else ""
+                st.progress(pct / 100, text=f"{MEASURE_LABELS[m]} {v:.1f}% · {_ordinal(pct)} pct{flag}")
+            st.caption(f"Percentile among US counties in {year}; higher = more prevalent.")
+            if match["fips"] not in selected_fips:
+                st.caption("Outside the selected region — shown dimmed on the map.")
+        if st.button("Clear lookup", key="clear_lookup", width="stretch"):
+            st.session_state.pop("lookup", None)
+            st.rerun()
 
 
 # --------------------------------------------------------------------------- #
@@ -283,16 +384,42 @@ def _county_layer(features: list[dict]) -> pdk.Layer:
     )
 
 
+def dot_spacing_px(zoom: float) -> float:
+    """Screen spacing of the dot pattern: wider when zoomed out, quantised for cache reuse."""
+    px = np.interp(zoom, DOT_SPACING_ZOOMS, DOT_SPACING_PX)
+    return float(round(px * 2) / 2)
+
+
+def _in_view(df: pd.DataFrame, view: pdk.ViewState, margin: float = 1.0) -> pd.Series:
+    """Counties whose centroid lies within the initial viewport, padded by `margin`
+    viewport widths on every side so a little panning still shows patterns."""
+    scale = DECK_WORLD_PX * 2**view.zoom  # screen px per world unit
+    half_w = MAP_WIDTH_PX / 2 * (1 + 2 * margin) / scale * 360
+    cy = _mercator_y(view.latitude) / DECK_WORLD_PX
+    half_h = MAP_HEIGHT_PX / 2 * (1 + 2 * margin) / scale
+    lat_hi = float(np.degrees(2 * np.arctan(np.exp(np.pi * (1 - 2 * (cy - half_h)))) - np.pi / 2))
+    lat_lo = float(np.degrees(2 * np.arctan(np.exp(np.pi * (1 - 2 * (cy + half_h)))) - np.pi / 2))
+    dlon = (df["lon"] - view.longitude + 180) % 360 - 180
+    return dlon.abs().le(half_w) & df["lat"].between(lat_lo, lat_hi)
+
+
 def pattern_layers(
     year_df: pd.DataFrame,
     overlays: list[str],
     cutoffs: dict[str, float],
     selected_fips: set[str],
-    zoom: float,
+    view: pdk.ViewState,
 ) -> list[pdk.Layer]:
-    """Hatch / dot layers for counties at or above each measure's cutoff."""
-    spacing = dl.pattern_spacing_m(zoom, PATTERN_SPACING_PX)
+    """Hatch / dot layers for counties at or above each measure's cutoff.
+
+    Pattern geometry is only built near the initial viewport: a zoomed-in view
+    (e.g. after an address lookup) would otherwise generate fine-spaced patterns
+    for the whole country.
+    """
+    spacing = dl.pattern_spacing_m(view.zoom, PATTERN_SPACING_PX)
+    dot_spacing = dl.pattern_spacing_m(view.zoom, dot_spacing_px(view.zoom))
     in_sel = year_df[year_df["fips"].isin(selected_fips)]
+    in_sel = in_sel[_in_view(in_sel, view)]
     layers = []
     for m in overlays:
         if m not in OVERLAY_STYLES:
@@ -303,30 +430,113 @@ def pattern_layers(
         style = OVERLAY_STYLES[m]
         if style["pattern"] == "dots":
             layers.append(pdk.Layer(
-                "ScatterplotLayer", data=dl.dot_points(fips, spacing), id=f"pattern_{m}",
+                "ScatterplotLayer", data=dl.dot_points(fips, dot_spacing), id=f"pattern_{m}",
                 get_position=["lon", "lat"], get_fill_color=_hex_to_rgb(style["color"]),
-                get_radius=0.7, radius_units="pixels", radius_min_pixels=0.6,
-                radius_max_pixels=0.9, stroked=False, pickable=False,
+                get_radius=DOT_RADIUS_PX, radius_units='"pixels"', stroked=False, pickable=False,
             ))
         else:
             layers.append(pdk.Layer(
                 "PathLayer", data=dl.hatch_paths(fips, spacing, style["pattern"]), id=f"pattern_{m}",
-                get_path="path", get_color=_hex_to_rgb(style["color"]),
-                get_width=0.5, width_units="pixels", width_min_pixels=0.4,
-                width_max_pixels=0.6, cap_rounded=True, pickable=False,
+                get_path="path", get_color=_hex_to_rgb(style["color"], round(255 * PATTERN_OPACITY)),
+                get_width=PATTERN_LINE_PX, width_units='"pixels"', cap_rounded=False, pickable=False,
             ))
     return layers
 
 
-def render_map(layers: list[pdk.Layer], view: pdk.ViewState, key: str = "risk_map") -> None:
+def _pin_layers(pin: dict | None) -> list[pdk.Layer]:
+    if pin is None:
+        return []
+    return [pdk.Layer(
+        "ScatterplotLayer", data=[pin], id="lookup_pin",
+        get_position=["lon", "lat"], get_fill_color=_hex_to_rgb(INK_PRIMARY),
+        get_line_color=[255, 255, 255, 255], get_radius=6, radius_units='"pixels"',
+        stroked=True, get_line_width=2, line_width_units='"pixels"', pickable=False,
+    )]
+
+
+def _outline_layer(geojson: dict, layer_id: str, width_px: float) -> pdk.Layer:
+    return pdk.Layer(
+        "GeoJsonLayer", data=geojson, id=layer_id,
+        filled=False, stroked=True, get_line_color=_hex_to_rgb(INK_PRIMARY),
+        get_line_width=width_px, line_width_units='"pixels"', line_joint_rounded=True,
+        pickable=False,
+    )
+
+
+def highlight_layers(
+    year: int, selected_fips: set[str], filtered: bool, pin: dict | None,
+) -> list[pdk.Layer]:
+    """Black outlines marking the selected geography: chosen states and the looked-up county."""
+    layers = []
+    if filtered and selected_fips:
+        layers.append(_outline_layer(
+            dl.selection_outline(tuple(sorted(selected_fips)), year, by_state=True), "selected_states", 2,
+        ))
+    if pin is not None:
+        layers.append(_outline_layer(
+            dl.selection_outline((pin["fips"],), year, by_state=False), "selected_county", 2.5,
+        ))
+    return layers
+
+
+# deck.gl places the tooltip at a fixed offset from the cursor, and Streamlit's
+# overflow-hidden map container clips it near the edges. This re-places it
+# centred above the cursor (below when there is no room) and keeps it inside the
+# map, like Leaflet's auto-direction tooltips.
+TOOLTIP_PLACEMENT_JS = r"""
+<script>
+(() => {
+  if (window.__cognimapTooltip) return;
+  window.__cognimapTooltip = true;
+  const GAP = 14, PAD = 6;
+  // deck.gl's own tooltip y can be offset inside Streamlit, so track the real cursor.
+  let cx = 0, cy = 0;
+  window.addEventListener("pointermove", (e) => { cx = e.clientX; cy = e.clientY; }, true);
+  const place = (el) => {
+    if (el.style.display === "none" || el.dataset.placed === el.style.transform) return;
+    const map = el.closest('[data-testid="stDeckGlJsonChart"]');
+    if (!map || !el.offsetParent) return;
+    const box = map.getBoundingClientRect(), origin = el.offsetParent.getBoundingClientRect();
+    const w = el.offsetWidth, h = el.offsetHeight;
+    let left = cx - w / 2, top = cy - h - GAP;
+    if (top < box.top + PAD) top = cy + GAP;
+    left = Math.min(Math.max(left, box.left + PAD), box.right - w - PAD);
+    top = Math.min(Math.max(top, box.top + PAD), box.bottom - h - PAD);
+    const t = `translate(${left - origin.left}px, ${top - origin.top}px)`;
+    el.dataset.placed = t;
+    el.style.transform = t;
+  };
+  const watched = new WeakSet();
+  const watch = () => document.querySelectorAll(".deck-tooltip").forEach((el) => {
+    if (watched.has(el)) return;
+    watched.add(el);
+    new MutationObserver(() => place(el)).observe(el, { attributes: true, attributeFilter: ["style"] });
+  });
+  watch();
+  new MutationObserver(watch).observe(document.body, { childList: true, subtree: true });
+})();
+</script>
+"""
+
+
+def install_tooltip_placement() -> None:
+    st.html(TOOLTIP_PLACEMENT_JS, unsafe_allow_javascript=True)
+
+
+def render_map(
+    layers: list[pdk.Layer], view: pdk.ViewState, pin: dict | None = None,
+    highlight: list[pdk.Layer] = (), key: str = "risk_map",
+) -> None:
     deck = pdk.Deck(
-        layers=layers,
+        layers=[*layers, *highlight, *_pin_layers(pin)],
         initial_view_state=view,
         map_provider="carto",
         map_style="light",
         tooltip={
             "html": TOOLTIP_HTML,
-            "style": {"backgroundColor": "white", "color": INK_PRIMARY, "border": "1px solid #ccc"},
+            "style": {"backgroundColor": "white", "color": INK_PRIMARY, "border": "1px solid #ccc",
+                      "borderRadius": "4px", "boxShadow": "0 1px 4px rgba(0,0,0,.2)",
+                      "maxWidth": "280px"},
         },
     )
     st.pydeck_chart(deck, height=MAP_HEIGHT_PX, key=key)
@@ -334,11 +544,12 @@ def render_map(layers: list[pdk.Layer], view: pdk.ViewState, key: str = "risk_ma
 
 def render_sori_map(
     geojson: dict, year_df: pd.DataFrame, panel: pd.DataFrame,
-    selected_fips: set[str], filtered: bool,
+    selected_fips: set[str], view: pdk.ViewState, pin: dict | None = None,
+    highlight: list[pdk.Layer] = (),
 ) -> None:
     breaks = color_breaks(tuple(panel[COMPOSITE].astype(float)), len(SEQUENTIAL_RAMP))
     features = build_map_features(geojson, year_df, COMPOSITE, breaks, SEQUENTIAL_RAMP, selected_fips)
-    render_map([_county_layer(features)], view_state(selected_fips, filtered))
+    render_map([_county_layer(features)], view, pin, highlight)
     _ramp_legend(SEQUENTIAL_RAMP, breaks, lambda v: f"{v:.0f}", COMPOSITE_LABEL)
     st.markdown(
         f"<div style='font-size:11px;color:{INK_MUTED}'>Classes are pooled quantiles across all "
@@ -349,7 +560,9 @@ def render_sori_map(
 
 def render_overlay_map(
     geojson: dict, year_df: pd.DataFrame, panel: pd.DataFrame,
-    selected_fips: set[str], filtered: bool, overlays: list[str],
+    selected_fips: set[str], view: pdk.ViewState, overlays: list[str],
+    top_pct: int = PATTERN_TOP_DEFAULT, pin: dict | None = None,
+    highlight: list[pdk.Layer] = (),
 ) -> None:
     show_cog = OUTCOME_MEASURE in overlays
     breaks = (
@@ -359,12 +572,11 @@ def render_overlay_map(
     features = build_map_features(
         geojson, year_df, OUTCOME_MEASURE if show_cog else None, breaks, COGNITION_RAMP, selected_fips
     )
-    view = view_state(selected_fips, filtered)
     cutoffs = {
-        m: percentile_cutoff(tuple(panel[m].astype(float)), PATTERN_PERCENTILE) for m in SENSORY_MEASURES
+        m: percentile_cutoff(tuple(panel[m].astype(float)), 100 - top_pct) for m in SENSORY_MEASURES
     }
-    layers = [_county_layer(features), *pattern_layers(year_df, overlays, cutoffs, selected_fips, view.zoom)]
-    render_map(layers, view)
+    layers = [_county_layer(features), *pattern_layers(year_df, overlays, cutoffs, selected_fips, view)]
+    render_map(layers, view, pin, highlight)
 
     if show_cog:
         _ramp_legend(COGNITION_RAMP, breaks, lambda v: f"{v:.1f}%",
@@ -377,33 +589,33 @@ def render_overlay_map(
     if items:
         st.markdown(
             f"<div style='font-size:12px;color:{INK_SECONDARY};margin:8px 0 2px'>{''.join(items)}</div>"
-            f"<div style='font-size:11px;color:{INK_MUTED}'>Patterns mark counties at or above the "
-            f"{PATTERN_PERCENTILE}th percentile of each measure (pooled across years). Gray: no estimate.</div>",
+            f"<div style='font-size:11px;color:{INK_MUTED}'>Patterns mark counties in the top "
+            f"{top_pct}% of each measure (pooled across years). Gray: no estimate.</div>",
             unsafe_allow_html=True,
         )
 
 
-def _pattern_swatch(measure: str) -> str:
+def _pattern_swatch(measure: str, width: int = 26, height: int = 14) -> str:
     style = OVERLAY_STYLES[measure]
     c = style["color"]
     if style["pattern"] == "dots":
         body = "".join(
-            f"<circle cx='{x}' cy='{y}' r='1.6' fill='{c}'/>"
-            for x, y in [(4, 4), (12, 4), (8, 10), (4, 16), (12, 16), (16, 10)]
-        )
-    elif style["pattern"] == "ne":
-        body = "".join(
-            f"<line x1='{o}' y1='20' x2='{o + 20}' y2='0' stroke='{c}' stroke-width='1.6'/>"
-            for o in (-14, -7, 0, 7, 14)
+            f"<circle cx='{x + (2 if row % 2 else 0)}' cy='{y}' r='1.1' fill='{c}'/>"
+            for row, y in enumerate(range(2, height, 4)) for x in range(2, width, 4)
         )
     else:
+        rising = style["pattern"] == "ne"
+        step = round(PATTERN_SPACING_PX * 2 ** 0.5)  # horizontal step for 45° lines
         body = "".join(
-            f"<line x1='{o}' y1='0' x2='{o + 20}' y2='20' stroke='{c}' stroke-width='1.6'/>"
-            for o in (-14, -7, 0, 7, 14)
+            f"<line x1='{x}' y1='{height if rising else 0}' x2='{x + height}' "
+            f"y2='{0 if rising else height}' stroke='{c}' stroke-width='{PATTERN_LINE_PX}' "
+            f"stroke-opacity='{PATTERN_OPACITY}'/>"
+            for x in range(-height, width + 1, step)
         )
     return (
-        "<svg width='20' height='20' viewBox='0 0 20 20' style='border:1px solid #c3c2b7;"
-        f"border-radius:3px;background:#fff;overflow:hidden'>{body}</svg>"
+        f"<svg width='{width}' height='{height}' viewBox='0 0 {width} {height}' "
+        "style='border:1px solid #999;background:#fff;overflow:hidden;vertical-align:middle'>"
+        f"{body}</svg>"
     )
 
 
@@ -503,7 +715,7 @@ def score_trend_chart(panel: pd.DataFrame, fips: set[str], title: str) -> go.Fig
     fig.add_trace(go.Scatter(x=x, y=g[0.75], line=dict(width=0), showlegend=False, hoverinfo="skip"))
     fig.add_trace(
         go.Scatter(
-            x=x, y=g[0.25], fill="tonexty", fillcolor="rgba(42,120,214,0.15)",
+            x=x, y=g[0.25], fill="tonexty", fillcolor=f"rgba({','.join(map(str, _hex_to_rgb(COMPOSITE_COLOR)[:3]))},0.15)",
             line=dict(width=0), name="Interquartile range",
             hovertemplate="25th pct: %{y:.0f}<extra></extra>",
         )
@@ -511,7 +723,7 @@ def score_trend_chart(panel: pd.DataFrame, fips: set[str], title: str) -> go.Fig
     fig.add_trace(
         go.Scatter(
             x=x, y=g[0.5], mode="lines+markers", name="Median",
-            line=dict(color=MEASURE_COLORS["VISION"], width=2),
+            line=dict(color=COMPOSITE_COLOR, width=2),
             marker=dict(size=8, line=dict(color="white", width=2)),
             hovertemplate="Median: %{y:.0f}<extra></extra>",
         )
@@ -531,7 +743,7 @@ def scatter_chart(df: pd.DataFrame, fit: ModelFit | None) -> go.Figure:
     fig = go.Figure(
         go.Scattergl(
             x=d[COMPOSITE], y=d[OUTCOME_MEASURE], mode="markers",
-            marker=dict(size=8, color=MEASURE_COLORS["VISION"], opacity=0.55,
+            marker=dict(size=8, color=COMPOSITE_COLOR, opacity=0.55,
                         line=dict(color="white", width=1)),
             text=d["county"] + ", " + d["state"],
             hovertemplate="<b>%{text}</b><br>" + COMPOSITE_SHORT + " %{x:.0f}<br>"
