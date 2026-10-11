@@ -63,7 +63,7 @@ OVERLAY_HINTS = {
     "COGNITION": "blue fill",
     "VISION": "orange ╱ hatch",
     "HEARING": "teal ╲ hatch",
-    "TEETHLOST": "brown dots",
+    "TEETHLOST": "black dots",
 }
 
 
@@ -380,7 +380,7 @@ def build_map_features(
                 state=r["state"],
                 fill=_hex_to_rgb(color, 235 if in_sel else 55),
                 score_txt=_fmt_metric(COMPOSITE, r.get(COMPOSITE)),
-                tier=r.get("risk_tier") or "–",
+                tier=r["risk_tier"] if isinstance(r.get("risk_tier"), str) else "–",  # NaN when no score
                 **{f"{m}_txt": _fmt_metric(m, r.get(m)) for m in ALL_MEASURES},
                 adults=f"{int(r['adult_population']):,}" if pd.notna(r["adult_population"]) else "–",
             )
