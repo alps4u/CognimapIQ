@@ -13,11 +13,11 @@ import streamlit as st
 from src import components as ui
 from src import data_loader as dl
 from src import model
-from src.config import COMPOSITE, COMPOSITE_LABEL, COMPOSITE_SHORT, MEASURE_LABELS, SENSORY_MEASURES, VALUE_TYPE, VALUE_TYPE_LABEL
+from src.config import COMPOSITE, COMPOSITE_LABEL, COMPOSITE_SHORT, FAVICON_PATH, MEASURE_LABELS, SENSORY_MEASURES, VALUE_TYPE, VALUE_TYPE_LABEL
 
 st.set_page_config(
     page_title="Cognimap IQ",
-    page_icon="🧠",
+    page_icon=str(FAVICON_PATH),
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -50,7 +50,7 @@ try:
     dl.load_places()
     dl.load_counties()
 except dl.SnapshotMissingError as exc:
-    st.title("Cognimap IQ")
+    ui.render_title("Cognimap IQ")
     st.error(str(exc))
     st.code("python scripts/preprocess.py", language="bash")
     st.stop()
@@ -81,7 +81,7 @@ def _toggle_play() -> None:
 # --------------------------------------------------------------------------- #
 head_l, head_r = st.columns([3, 2], vertical_alignment="bottom")
 with head_l:
-    st.title("Cognimap IQ")
+    ui.render_title("Cognimap IQ")
     st.caption(
         "Spatial evidence linking sensory impairment — vision, hearing and mastication — "
         "to cognitive decline, to guide budgets toward low-cost preventative care during "

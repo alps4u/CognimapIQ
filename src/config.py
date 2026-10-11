@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data" / "processed"
 PLACES_PATH = DATA_DIR / "places_county.parquet"
 COUNTIES_PATH = DATA_DIR / "counties.parquet"
+FAVICON_PATH = ROOT / "assets" / "favicon.png"
 
 CRS = "EPSG:4326"
 

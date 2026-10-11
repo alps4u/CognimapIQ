@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import io
 from dataclasses import dataclass
 
 import numpy as np
@@ -9,6 +11,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import pydeck as pdk
 import streamlit as st
+from PIL import Image
 
 from src import data_loader as dl
 from src.config import (
@@ -22,6 +25,7 @@ from src.config import (
     DOT_RADIUS_PX,
     DOT_SPACING_PX,
     DOT_SPACING_ZOOMS,
+    FAVICON_PATH,
     GRIDLINE,
     INK_MUTED,
     INK_PRIMARY,
@@ -53,6 +57,25 @@ OVERLAY_HINTS = {
     "HEARING": "teal ╲ hatch",
     "TEETHLOST": "brown dots",
 }
+
+
+# --------------------------------------------------------------------------- #
+# Title
+# --------------------------------------------------------------------------- #
+@st.cache_data(show_spinner=False)
+def _icon_data_uri(size_px: int = 128) -> str:
+    """App logo downsized and inlined, so the title needs no static file route."""
+    buf = io.BytesIO()
+    Image.open(FAVICON_PATH).resize((size_px, size_px), Image.LANCZOS).save(buf, format="PNG", optimize=True)
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def render_title(text: str) -> None:
+    st.markdown(
+        f"<h1 style='display:flex;align-items:center'>{text}"
+        f"<img src='{_icon_data_uri()}' alt='' style='height:1.25em;width:1.25em;margin-left:0.3em'/></h1>",
+        unsafe_allow_html=True,
+    )
 
 
 # --------------------------------------------------------------------------- #
