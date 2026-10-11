@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from src.config import COMPOSITE, OUTCOME_MEASURE, RISK_TIERS, SENSORY_MEASURES
+from src.config import COMPOSITE, OUTCOME_MEASURE, PLAN_BENEFITS, RISK_TIERS, SENSORY_MEASURES
 
 
 # --------------------------------------------------------------------------- #
@@ -200,6 +200,11 @@ def summarize(df: pd.DataFrame) -> dict:
     return stats
 
 
+def priority_ranking(df: pd.DataFrame) -> pd.DataFrame:
+    """Counties ordered for intervention: highest Sensory Organ Risk Index first."""
+    return df.dropna(subset=[COMPOSITE]).sort_values(COMPOSITE, ascending=False)
+
+
 def national_trend(panel: pd.DataFrame) -> pd.DataFrame:
     """Population-weighted prevalence by year for each measure (long format)."""
     rows = []
@@ -216,3 +221,81 @@ def county_change(panel: pd.DataFrame, col: str, start: int, end: int) -> pd.Dat
     out = b.merge(a, on="fips", how="inner")
     out["change"] = out["end"] - out["start"]
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Care access: Medicare Advantage plan benefits and health centers
+# --------------------------------------------------------------------------- #
+def plan_benefit_shares(plans: pd.DataFrame, plan_counties: pd.DataFrame) -> pd.DataFrame:
+    """Per county: number of individual MA plans and the share offering each benefit."""
+    df = plan_counties.merge(plans[["bid_id", *PLAN_BENEFITS]], on="bid_id")
+    out = df.groupby("fips")[list(PLAN_BENEFITS)].agg(["sum", "mean"])
+    out.columns = [f"{b}_{'plans' if agg == 'sum' else 'share'}" for b, agg in out.columns]
+    out["plans"] = df.groupby("fips").size()
+    return out.reset_index()
+
+
+def plan_access_summary(shares: pd.DataFrame, fips: str, state_fips: set[str]) -> pd.DataFrame | None:
+    """Benefit rows for one county, with state and national medians of county shares."""
+    row = shares[shares["fips"] == fips]
+    if row.empty:
+        return None
+    r = row.iloc[0]
+    state = shares[shares["fips"].isin(state_fips)]
+    return pd.DataFrame([
+        {
+            "benefit": b,
+            "plans": int(r[f"{b}_plans"]),
+            "share": float(r[f"{b}_share"]),
+            "state_median": float(state[f"{b}_share"].median()),
+            "us_median": float(shares[f"{b}_share"].median()),
+        }
+        for b in PLAN_BENEFITS
+    ])
+
+
+def county_health_centers(sites: pd.DataFrame, fips: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Health center sites in a county, and the organisations operating them with
+    how many of their sites fall in the county (UDS reports per organisation, so
+    `sites_in_county` / `sites_total` gives the county's share of its sites)."""
+    local = sites[sites["fips"] == fips]
+    totals = sites.groupby("bhcmis_id").size().rename("sites_total")
+    in_county = local.groupby("bhcmis_id").size().rename("sites_in_county")
+    orgs = (
+        pd.concat([in_county, totals.reindex(in_county.index)], axis=1).reset_index()
+        .merge(local.drop_duplicates("bhcmis_id")[["bhcmis_id", "health_center"]], on="bhcmis_id")
+    )
+    return local, orgs.sort_values("sites_in_county", ascending=False).reset_index(drop=True)
+
+
+def uds_service_history(orgs: pd.DataFrame, uds: pd.DataFrame, service: str) -> pd.DataFrame:
+    """One UDS service for each organisation, one column per reporting year."""
+    wide = (
+        uds[uds["bhcmis_id"].isin(orgs["bhcmis_id"])]
+        .pivot(index="bhcmis_id", columns="year", values=service)
+        .reindex(columns=sorted(uds["year"].unique()))
+    )
+    return orgs.merge(wide, left_on="bhcmis_id", right_index=True, how="left")
+
+
+def uds_org_history(uds: pd.DataFrame, bhcmis_id: str, services: list[str]) -> pd.DataFrame:
+    """All selected UDS services for one organisation: services as rows, years as columns."""
+    org = uds[uds["bhcmis_id"] == bhcmis_id].set_index("year")[services]
+    return org.reindex(sorted(uds["year"].unique())).T
+
+
+def uds_county_summary(
+    orgs: pd.DataFrame, uds: pd.DataFrame, services: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Estimated county totals of UDS services by year (services as rows, years as
+    columns) and how many of the county's organisations published each value.
+
+    UDS counts are organisation-wide, so each organisation contributes its count
+    times the share of its sites located in the county."""
+    share = (orgs["sites_in_county"] / orgs["sites_total"]).set_axis(orgs["bhcmis_id"])
+    data = uds[uds["bhcmis_id"].isin(share.index)].set_index(["bhcmis_id", "year"])[services]
+    years = sorted(uds["year"].unique())
+    weighted = data.mul(share, axis=0, level="bhcmis_id").astype(float)
+    totals = weighted.groupby(level="year").sum(min_count=1).reindex(years).T
+    reporting = data.notna().groupby(level="year").sum().reindex(years, fill_value=0).T
+    return totals, reporting

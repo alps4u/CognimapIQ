@@ -6,6 +6,7 @@ Run with:  streamlit run app.py
 from __future__ import annotations
 
 import time
+from functools import partial
 
 import pandas as pd
 import streamlit as st
@@ -41,6 +42,22 @@ def scored_panel(value_type: str, weights: tuple[tuple[str, float], ...]) -> pd.
     fits = model_fits(value_type)
     parts = [model.add_model_outputs(g, fits.get(y)) for y, g in panel.groupby("year")]
     return pd.concat(parts, ignore_index=True)
+
+
+@st.cache_data(show_spinner=False)
+def plan_shares() -> pd.DataFrame:
+    return model.plan_benefit_shares(dl.load_ma_plans(), dl.load_ma_plan_counties())
+
+
+def county_access() -> ui.CountyAccess | None:
+    """Care-access tables for the county profile, or None before preprocess_access.py has run."""
+    if not dl.access_snapshot_ready():
+        return None
+    return ui.CountyAccess(
+        medicaid=dl.load_medicaid_benefits(), plans=dl.load_ma_plans(),
+        plan_counties=dl.load_ma_plan_counties(), plan_shares=plan_shares(),
+        sites=dl.load_hc_sites(), uds=dl.load_hc_uds(),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -130,6 +147,19 @@ ui.render_lookup_result(controls.lookup_slot, year_all, panel, year, controls.pa
                         selected_fips)
 pin = ui.lookup_pin(year_all)
 
+PROFILE_TAB = "🏥 County profile"
+
+# County profile defaults to the first county of the Intervention priority table and
+# is re-seeded whenever that ranking changes (region, year or SORI weights); a manual
+# pick is kept until then.
+ranking = model.priority_ranking(year_df)
+top_fips = ranking["fips"].iloc[0] if len(ranking) else None
+priority_key = (tuple(controls.states), year, tuple(sorted(weights.items())))
+if top_fips and (st.session_state.get("_profile_priority") != priority_key
+                 or st.session_state.get("profile_fips") not in set(year_all["fips"])):
+    st.session_state.update(_profile_priority=priority_key, profile_fips=top_fips,
+                            profile_state=ranking["state"].iloc[0])
+
 stats = model.summarize(year_df)
 prev_stats = model.summarize(prev_df) if prev_df is not None and len(prev_df) else None
 
@@ -138,8 +168,10 @@ if year_df.empty:
     st.warning("No counties match the current filters.")
     st.stop()
 
-tab_map, tab_time, tab_model, tab_table = st.tabs(
-    ["🗺️ Spatial risk map", "📈 Longitudinal & policy view", "🧮 Predictive analytics", "📋 Priority regions"]
+tab_map, tab_profile, tab_time, tab_model, tab_table = st.tabs(
+    ["🗺️ Spatial risk map", PROFILE_TAB, "📈 Longitudinal & policy view",
+     "🧮 Predictive analytics", "📋 Priority regions"],
+    key="main_tab", on_change="rerun",  # keyed so a map click can switch to the profile
 )
 
 # --------------------------------------------------------------------------- #
@@ -153,15 +185,19 @@ with tab_map:
     else:
         view = ui.view_state(selected_fips, filtered)
     highlight = ui.highlight_layers(year, selected_fips, filtered, pin)
+    # Clicking a county opens it in the County profile tab.
+    map_key = f"risk_map_{st.session_state.get('_map_nonce', 0)}"
+    map_click = {"key": map_key,
+                 "on_click": partial(ui.open_profile_on_click, map_key, "main_tab", PROFILE_TAB)}
     if controls.map_mode == "overlay":
         st.markdown(f"#### Cognitive & sensory overlay · {year}")
         if not controls.overlays:
             st.info("Select at least one layer in the sidebar.")
         ui.render_overlay_map(geojson, year_all, panel, selected_fips, view,
-                              controls.overlays, controls.pattern_top_pct, pin, highlight)
+                              controls.overlays, controls.pattern_top_pct, pin, highlight, **map_click)
     else:
         st.markdown(f"#### {COMPOSITE_LABEL} · {year}")
-        ui.render_sori_map(geojson, year_all, panel, selected_fips, view, pin, highlight)
+        ui.render_sori_map(geojson, year_all, panel, selected_fips, view, pin, highlight, **map_click)
 
     teeth_year = year_all["teethlost_source_year"].dropna()
     if len(teeth_year) and int(teeth_year.iloc[0]) != year:
@@ -172,6 +208,14 @@ with tab_map:
 
     w_txt = " · ".join(f"{MEASURE_LABELS[m]} {weights[m]:.0%}" for m in SENSORY_MEASURES)
     st.caption(f"{COMPOSITE_SHORT} weights ({controls.weight_mode.lower()}): {w_txt}")
+    st.caption("Click a county to open it in the County profile tab.")
+
+# --------------------------------------------------------------------------- #
+# County profile — sensory burden and access to preventative care
+# --------------------------------------------------------------------------- #
+with tab_profile:
+    profile_fips = ui.render_county_picker(year_all, top_fips, pin)
+    ui.render_county_profile(profile_fips, panel, year, county_access())
 
 # --------------------------------------------------------------------------- #
 # Secondary view — longitudinal & policy
@@ -254,7 +298,7 @@ with tab_model:
 with tab_table:
     t1, t2 = st.columns([3, 1], vertical_alignment="bottom")
     t1.markdown(f"#### Intervention priority — {region_label}, {year}")
-    top_n = t2.selectbox("Show", [25, 50, 100, 250, 500], index=1)
+    top_n = t2.selectbox("Show Top", [25, 50, 100, 250, 500], index=1)
     ui.render_priority_table(year_df, top_n)
     export = year_df.drop(columns=[c for c in year_df.columns if c.startswith("z_")])
     st.download_button(

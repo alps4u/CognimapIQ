@@ -14,7 +14,9 @@ import streamlit as st
 from PIL import Image
 
 from src import data_loader as dl
+from src import model
 from src.config import (
+    ACCESS_SOURCES,
     ALL_MEASURES,
     COGNITION_RAMP,
     COMPOSITE,
@@ -33,10 +35,12 @@ from src.config import (
     MEASURE_COLORS,
     MEASURE_DESCRIPTIONS,
     MEASURE_LABELS,
+    MEDICAID_BENEFITS,
     NEUTRAL_FILL,
     NO_DATA_COLOR,
     OUTCOME_MEASURE,
     OVERLAY_STYLES,
+    PLAN_BENEFITS,
     PATTERN_LINE_PX,
     PATTERN_OPACITY,
     PATTERN_SPACING_PX,
@@ -46,8 +50,9 @@ from src.config import (
     SAMPLE_ADDRESS,
     SENSORY_MEASURES,
     SEQUENTIAL_RAMP,
+    UDS_SERVICES,
 )
-from src.model import ModelFit, ScenarioResult
+from src.model import ModelFit, ScenarioResult, weighted_mean
 
 RESIDUAL = "residual"
 MAP_MODES = {"sori": COMPOSITE_LABEL, "overlay": "Cognitive & sensory overlay"}
@@ -328,6 +333,7 @@ def build_map_features(
             color = _classify(r.get(fill_metric), breaks, ramp) if fill_metric else NEUTRAL_FILL
             props.update(
                 name=f"{r['county']}, {r['state']}",
+                state=r["state"],
                 fill=_hex_to_rgb(color, 235 if in_sel else 55),
                 score_txt=_fmt_metric(COMPOSITE, r.get(COMPOSITE)),
                 tier=r.get("risk_tier") or "–",
@@ -505,7 +511,8 @@ def highlight_layers(
 # deck.gl places the tooltip at a fixed offset from the cursor, and Streamlit's
 # overflow-hidden map container clips it near the edges. This re-places it
 # centred above the cursor (below when there is no room) and keeps it inside the
-# map, like Leaflet's auto-direction tooltips.
+# map, like Leaflet's auto-direction tooltips. It also keeps a double-click on a
+# county from deselecting it (see the end of the script).
 TOOLTIP_PLACEMENT_JS = r"""
 <script>
 (() => {
@@ -537,6 +544,24 @@ TOOLTIP_PLACEMENT_JS = r"""
   });
   watch();
   new MutationObserver(watch).observe(document.body, { childList: true, subtree: true });
+
+  // Map selection toggles: a second click on the same county deselects it, so a
+  // double-click would cancel the click that opens the county profile before it
+  // reaches Streamlit. Swallow the second press of a quick repeat at the same spot.
+  let lastUp = { t: -1e9, x: 0, y: 0 };
+  const onMap = (e) => e.target instanceof Element && e.target.closest('[data-testid="stDeckGlJsonChart"]');
+  for (const type of ["pointerdown", "pointerup"]) {
+    window.addEventListener(type, (e) => {
+      if (!onMap(e)) return;
+      const repeat = performance.now() - lastUp.t < 500 && Math.hypot(e.clientX - lastUp.x, e.clientY - lastUp.y) < 12;
+      if (repeat) {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+      } else if (type === "pointerup") {
+        lastUp = { t: performance.now(), x: e.clientX, y: e.clientY };
+      }
+    }, true);
+  }
 })();
 </script>
 """
@@ -546,13 +571,33 @@ def install_tooltip_placement() -> None:
     st.html(TOOLTIP_PLACEMENT_JS, unsafe_allow_javascript=True)
 
 
+def open_profile_on_click(map_key: str, tab_key: str, tab_label: str) -> None:
+    """`on_select` callback for the risk map: open the clicked county in the profile tab.
+
+    The map key carries a nonce that is bumped here, so the next render starts
+    without a selection (Streamlit would otherwise keep the clicked county
+    selected and dim the rest of the map)."""
+    state = st.session_state.get(map_key) or {}
+    objects = (state.get("selection") or {}).get("objects") or {}
+    picked = (objects.get("counties") or [None])[0]
+    props = (picked or {}).get("properties") or {}
+    if not props.get("state"):  # gray counties have no estimate to profile
+        return
+    st.session_state.update(
+        profile_fips=props["fips"], profile_state=props["state"], **{tab_key: tab_label},
+        _map_nonce=st.session_state.get("_map_nonce", 0) + 1,
+    )
+
+
 def render_map(
     layers: list[pdk.Layer], view: pdk.ViewState, pin: dict | None = None,
-    highlight: list[pdk.Layer] = (), key: str = "risk_map",
+    highlight: list[pdk.Layer] = (), key: str = "risk_map", on_click=None,
 ) -> None:
     deck = pdk.Deck(
         layers=[*layers, *highlight, *_pin_layers(pin)],
         initial_view_state=view,
+        # Clicks open the county profile, so double-click zoom is off (wheel and +/- still zoom).
+        views=[pdk.View(type="MapView", controller={"doubleClickZoom": False})],
         map_provider="carto",
         map_style="light",
         tooltip={
@@ -562,17 +607,21 @@ def render_map(
                       "maxWidth": "280px"},
         },
     )
-    st.pydeck_chart(deck, height=MAP_HEIGHT_PX, key=key)
+    if on_click is None:
+        st.pydeck_chart(deck, height=MAP_HEIGHT_PX, key=key)
+    else:
+        st.pydeck_chart(deck, height=MAP_HEIGHT_PX, key=key, on_select=on_click,
+                        selection_mode="single-object")
 
 
 def render_sori_map(
     geojson: dict, year_df: pd.DataFrame, panel: pd.DataFrame,
     selected_fips: set[str], view: pdk.ViewState, pin: dict | None = None,
-    highlight: list[pdk.Layer] = (),
+    highlight: list[pdk.Layer] = (), **map_kw,
 ) -> None:
     breaks = color_breaks(tuple(panel[COMPOSITE].astype(float)), len(SEQUENTIAL_RAMP))
     features = build_map_features(geojson, year_df, COMPOSITE, breaks, SEQUENTIAL_RAMP, selected_fips)
-    render_map([_county_layer(features)], view, pin, highlight)
+    render_map([_county_layer(features)], view, pin, highlight, **map_kw)
     _ramp_legend(SEQUENTIAL_RAMP, breaks, lambda v: f"{v:.0f}", COMPOSITE_LABEL)
     st.markdown(
         f"<div style='font-size:11px;color:{INK_MUTED}'>Classes are pooled quantiles across all "
@@ -585,7 +634,7 @@ def render_overlay_map(
     geojson: dict, year_df: pd.DataFrame, panel: pd.DataFrame,
     selected_fips: set[str], view: pdk.ViewState, overlays: list[str],
     top_pct: int = PATTERN_TOP_DEFAULT, pin: dict | None = None,
-    highlight: list[pdk.Layer] = (),
+    highlight: list[pdk.Layer] = (), **map_kw,
 ) -> None:
     show_cog = OUTCOME_MEASURE in overlays
     breaks = (
@@ -599,7 +648,7 @@ def render_overlay_map(
         m: percentile_cutoff(tuple(panel[m].astype(float)), 100 - top_pct) for m in SENSORY_MEASURES
     }
     layers = [_county_layer(features), *pattern_layers(year_df, overlays, cutoffs, selected_fips, view)]
-    render_map(layers, view, pin, highlight)
+    render_map(layers, view, pin, highlight, **map_kw)
 
     if show_cog:
         _ramp_legend(COGNITION_RAMP, breaks, lambda v: f"{v:.1f}%",
@@ -683,9 +732,49 @@ def _year_to_date(y: int) -> str:
     return f"{int(y)}-07-01"
 
 
+def _spread(ys: list[float], gap: float, lo: float, hi: float) -> list[float]:
+    """Positions for labels at heights `ys` (sorted ascending) at least `gap` apart,
+    each run of colliding labels centred on its members' mean and kept in [lo, hi]."""
+    clusters = [[y] for y in ys]  # each cluster: original heights of its labels
+    def place(c):
+        start = sum(c) / len(c) - (len(c) - 1) * gap / 2
+        start = min(max(start, lo), hi - (len(c) - 1) * gap)
+        return [start + i * gap for i in range(len(c))]
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(clusters) - 1):
+            if place(clusters[i])[-1] + gap > place(clusters[i + 1])[0]:
+                clusters[i:i + 2] = [clusters[i] + clusters[i + 1]]
+                merged = True
+                break
+    return [y for c in clusters for y in place(c)]
+
+
+def _add_end_labels(
+    fig: go.Figure, x: str, labels: list[tuple[float, str, str]], y_top: float, plot_px: float,
+    gap_px: float = 15,
+) -> None:
+    """Line-end labels (y, text, colour) in one column at `x` (the last year), spread
+    vertically so they never overlap. Lines ending earlier are labelled in the same
+    column, so labels never collide sideways either. The y axis must run from 0 to
+    `y_top`; `plot_px` is the approximate plot-area height used to turn the pixel gap
+    into data units. Labels take their line's colour so a nudged label still reads
+    as its line's."""
+    gap = y_top * gap_px / plot_px
+    labels = sorted(labels, key=lambda lab: lab[0])
+    positions = _spread([lab[0] for lab in labels], gap, gap / 2, y_top - gap / 2)
+    for (_, text, color), y in zip(labels, positions):
+        fig.add_annotation(
+            x=x, y=y, text=text, showarrow=False, xanchor="left", yanchor="middle", xshift=8,
+            font=dict(size=11, color=color),
+        )
+
+
 def trend_chart(trend: pd.DataFrame, current_year: int, title: str) -> go.Figure:
     """Prevalence by measure over time with policy / evidence milestones."""
     fig = go.Figure()
+    labels = []
     for m in ALL_MEASURES:
         d = trend[trend["measure"] == m].sort_values("year")
         if d["value"].isna().all():
@@ -702,10 +791,9 @@ def trend_chart(trend: pd.DataFrame, current_year: int, title: str) -> go.Figure
             )
         )
         last = d.dropna(subset=["value"]).iloc[-1]
-        fig.add_annotation(
-            x=_year_to_date(last["year"]), y=last["value"], text=MEASURE_LABELS[m],
-            showarrow=False, xanchor="left", xshift=8, font=dict(size=11, color=INK_SECONDARY),
-        )
+        labels.append((float(last["value"]), MEASURE_LABELS[m], MEASURE_COLORS[m]))
+    y_top = max(trend["value"].max() * 1.12, 1)
+    _add_end_labels(fig, _year_to_date(trend["year"].max()), labels, y_top, plot_px=250)
     years = trend["year"].unique()
     fig.add_vrect(
         x0=f"{current_year}-01-01", x1=f"{current_year}-12-31",
@@ -724,7 +812,69 @@ def trend_chart(trend: pd.DataFrame, current_year: int, title: str) -> go.Figure
         hovermode="x unified",
         legend=dict(orientation="h", y=-0.12, x=0),
         xaxis=dict(range=[f"{min(years) - 1}-06-01", "2025-01-31"], tickformat="%Y", dtick="M12"),
-        yaxis=dict(title="Adult prevalence (%)", rangemode="tozero"),
+        yaxis=dict(title="Adult prevalence (%)", range=[0, y_top]),
+    )
+    return fig
+
+
+# UDS service lines: dental in the tooth-loss hue, vision in the vision hue; line
+# style tells services of the same domain apart.
+UDS_SERVICE_STYLES = {
+    "dental_patients": (MEASURE_COLORS["TEETHLOST"], "solid"),
+    "dental_visits": (MEASURE_COLORS["TEETHLOST"], "dash"),
+    "oral_exam_patients": (MEASURE_COLORS["TEETHLOST"], "dot"),
+    "sealant_patients": (MEASURE_COLORS["TEETHLOST"], "dashdot"),
+    "fluoride_patients": (MEASURE_COLORS["TEETHLOST"], "longdash"),
+    "vision_patients": (MEASURE_COLORS["VISION"], "solid"),
+    "vision_visits": (MEASURE_COLORS["VISION"], "dash"),
+    "eye_exam_patients": (MEASURE_COLORS["VISION"], "dot"),
+}
+
+
+def uds_county_chart(totals: pd.DataFrame, reporting: pd.DataFrame, n_orgs: int, title: str) -> go.Figure:
+    """Estimated county totals of UDS services by year (rows: services, columns:
+    years), drawn like the prevalence trend chart. Lines join only years where
+    every organisation in the county published the count; years with gaps are
+    open markers, since their totals are understated and not comparable."""
+    fig = go.Figure()
+    years = [int(y) for y in totals.columns]
+    x = [_year_to_date(y) for y in years]
+    labels = []
+    for service, row in totals.iterrows():
+        if row.isna().all():
+            continue
+        color, dash = UDS_SERVICE_STYLES[service]
+        label = UDS_SERVICES[service]
+        values = [None if pd.isna(v) else float(v) for v in row]
+        counts = [int(c) for c in reporting.loc[service]]
+        complete = [v if c == n_orgs else None for v, c in zip(values, counts)]
+        partial = [v if c < n_orgs else None for v, c in zip(values, counts)]
+        fig.add_trace(go.Scatter(
+            x=x, y=complete, mode="lines+markers", name=label, legendgroup=label,
+            line=dict(color=color, width=2, dash=dash),
+            marker=dict(size=8, line=dict(color="white", width=2)),
+            hovertemplate="%{y:,.0f}<extra>" + label + "</extra>",
+        ))
+        if any(v is not None for v in partial):
+            fig.add_trace(go.Scatter(
+                x=x, y=partial, mode="markers", name=label, legendgroup=label, showlegend=False,
+                marker=dict(size=8, color="white", line=dict(color=color, width=2)),
+                customdata=[f"{c} of {n_orgs}" for c in counts],
+                hovertemplate="%{y:,.0f} (only %{customdata} orgs published)<extra>" + label + "</extra>",
+            ))
+        last = max(i for i, v in enumerate(values) if v is not None)
+        labels.append((values[last], label, color))
+    y_top = max(float(totals.max().max()) * 1.12, 1) if totals.notna().any().any() else 1
+    _add_end_labels(fig, x[-1], labels, y_top, plot_px=230)
+    _base_layout(
+        fig,
+        title=dict(text=title, font=dict(size=14, color=INK_PRIMARY), x=0, y=0.98),
+        hovermode="x unified",
+        legend=dict(orientation="h", y=-0.12, x=0),
+        # room on the right for the label column; ticks only on data years
+        xaxis=dict(range=[f"{min(years) - 1}-06-01", f"{max(years) + 2}-03-01"],
+                   tickvals=x, ticktext=[str(y) for y in years]),
+        yaxis=dict(title="Patients / visits (estimated, county)", range=[0, y_top]),
     )
     return fig
 
@@ -884,8 +1034,7 @@ def render_priority_table(df: pd.DataFrame, top_n: int) -> pd.DataFrame:
     cols = ["county", "state", COMPOSITE, "risk_tier",
             *SENSORY_MEASURES, OUTCOME_MEASURE, "predicted_cognition", RESIDUAL, "adult_population"]
     table = (
-        df.dropna(subset=[COMPOSITE])
-        .sort_values(COMPOSITE, ascending=False)
+        model.priority_ranking(df)
         .head(top_n)[cols]
         .rename(columns={
             "county": "County", "state": "State", COMPOSITE: COMPOSITE_LABEL,
@@ -907,3 +1056,348 @@ def render_priority_table(df: pd.DataFrame, top_n: int) -> pd.DataFrame:
         },
     )
     return table
+
+
+# --------------------------------------------------------------------------- #
+# County profile
+# --------------------------------------------------------------------------- #
+@dataclass
+class CountyAccess:
+    medicaid: pd.DataFrame
+    plans: pd.DataFrame
+    plan_counties: pd.DataFrame
+    plan_shares: pd.DataFrame
+    sites: pd.DataFrame
+    uds: pd.DataFrame
+
+
+def _show_county(fips: str, state: str) -> None:
+    st.session_state.update(profile_fips=fips, profile_state=state)
+
+
+def _county_name(year_all: pd.DataFrame, fips: str) -> str:
+    r = year_all.loc[year_all["fips"] == fips].iloc[0]
+    return f"{r['county']}, {r['state']}"
+
+
+def render_county_picker(year_all: pd.DataFrame, top_fips: str | None, pin: dict | None) -> str:
+    """State + county selectors for the profile tab (session keys `profile_state` /
+    `profile_fips`, seeded by the caller with the top Intervention priority county),
+    plus shortcuts back to that county and to the address-lookup county."""
+    states = year_all[["state", "state_name"]].drop_duplicates().sort_values("state_name")
+    names = dict(zip(states["state"], states["state_name"]))
+    c1, c2 = st.columns([1, 2])
+    state = c1.selectbox("State", list(names), format_func=names.get, key="profile_state")
+    counties = year_all[year_all["state"] == state].sort_values("county")
+    if st.session_state.get("profile_fips") not in set(counties["fips"]):
+        st.session_state["profile_fips"] = counties["fips"].iloc[0]
+    # PLACES names independent cities like their namesake county (Fairfax 51059 / 51600).
+    dup = counties["county"].duplicated(keep=False)
+    is_city = counties["fips"].str[2:].astype(int) >= 500
+    names_shown = counties["county"].where(~(dup & is_city), counties["county"] + " city")
+    labels = dict(zip(counties["fips"], names_shown))
+    fips = c2.selectbox(
+        "County", list(labels), format_func=lambda f: f"{labels[f]} ({f})", key="profile_fips",
+        help="Defaults to the first county in the Intervention priority table.",
+    )
+
+    shortcuts = []
+    if top_fips and top_fips != fips:
+        shortcuts.append((f"↺ Top priority: {_county_name(year_all, top_fips)}", top_fips, "profile_top"))
+    if pin and pin["state"] and pin["fips"] != fips:
+        shortcuts.append((f"📍 Looked-up: {_county_name(year_all, pin['fips'])}", pin["fips"], "profile_pin"))
+    if shortcuts:
+        cols = st.columns(len(shortcuts) + 1)
+        for col, (label, target, key) in zip(cols, shortcuts):
+            state_of = year_all.loc[year_all["fips"] == target, "state"].iloc[0]
+            col.button(label, key=key, on_click=_show_county, args=(target, state_of), width="stretch")
+    return fips
+
+
+def _section(title: str, caption: str | None = None) -> None:
+    st.markdown(f"#### {title}")
+    if caption:
+        st.caption(caption)
+
+
+def _profile_metrics(r: pd.Series, state_rows: pd.DataFrame, year_all: pd.DataFrame) -> None:
+    c = st.columns(5)
+    score = r.get(COMPOSITE)
+    c[0].metric(
+        COMPOSITE_SHORT, "–" if pd.isna(score) else f"{score:.0f}", r.get("risk_tier") or None,
+        delta_color="off", delta_arrow="off",
+        help=f"{COMPOSITE_LABEL}: 0–100 percentile of combined sensory burden, pooled across all years.",
+    )
+    for col, m in zip(c[1:], [OUTCOME_MEASURE, *SENSORY_MEASURES]):
+        v = r.get(m)
+        state_avg = weighted_mean(state_rows[m], state_rows["adult_population"])
+        pct = (year_all[m].dropna() <= v).mean() * 100 if pd.notna(v) else float("nan")
+        col.metric(
+            MEASURE_LABELS[m], _fmt_pct(v),
+            None if pd.isna(v) or pd.isna(state_avg) else f"{v - state_avg:+.1f} pp vs {r['state']}",
+            delta_color="inverse",
+            help=f"{MEASURE_DESCRIPTIONS[m]} National percentile: {pct:.0f}." if pd.notna(pct)
+            else MEASURE_DESCRIPTIONS[m],
+        )
+
+
+_MEDICAID_STATUS = {"Yes": "✓ Covered", "No": "✕ Not covered", "NR": "– Not reported"}
+
+
+def _render_medicaid(medicaid: pd.DataFrame, state: str, state_name: str) -> None:
+    rows = medicaid[medicaid["state"] == state].set_index("benefit")
+    year = int(medicaid["survey_year"].max())
+    _section(f"{state_name} Medicaid — adult benefits",
+             f"KFF Medicaid Benefits Database, {year} survey (state-reported fee-for-service coverage "
+             "for categorically needy adults). Coverage may have changed since.")
+    items = []
+    for b, label in MEDICAID_BENEFITS.items():
+        status = rows.loc[b, "covered"] if b in rows.index else "NR"
+        weight = 600 if status == "Yes" else 400
+        items.append(
+            f"<div style='display:flex;justify-content:space-between;padding:7px 0;"
+            f"border-bottom:1px solid {GRIDLINE}'><span>{label}</span>"
+            f"<span style='font-weight:{weight};color:{INK_PRIMARY if status == 'Yes' else INK_SECONDARY}'>"
+            f"{_MEDICAID_STATUS.get(status, status)}</span></div>"
+        )
+    st.markdown("".join(items), unsafe_allow_html=True)
+    details = rows.reindex(list(MEDICAID_BENEFITS))[["covered", "copay", "limits", "prior_approval"]]
+    if details[["copay", "limits", "prior_approval"]].notna().any().any():
+        with st.expander("Copays, limits and prior approval"):
+            st.dataframe(
+                details.rename(index=MEDICAID_BENEFITS, columns={
+                    "covered": "Covered", "copay": "Copay", "limits": "Limits",
+                    "prior_approval": "Prior approval"}),
+                width="stretch",
+            )
+
+
+def _render_ma_plans(access: CountyAccess, fips: str, state: str, year_all: pd.DataFrame) -> None:
+    plan_year = int(access.plans["year"].max())
+    _section("Medicare Advantage plans in this county",
+             f"CMS Plan Benefit Package {plan_year}: individual (non-employer) Medicare Advantage plans "
+             "offered in the county, including special needs plans. Benefits are supplemental to "
+             "Original Medicare.")
+    state_fips = set(year_all.loc[year_all["state"] == state, "fips"])
+    summary = model.plan_access_summary(access.plan_shares, fips, state_fips)
+    if summary is None:
+        note = (" CMS lists Connecticut by its legacy counties, which do not map to planning regions."
+                if state == "CT" else "")
+        st.info("No individual Medicare Advantage plans found for this county." + note)
+        return
+    local = access.plans[access.plans["bid_id"].isin(
+        access.plan_counties.loc[access.plan_counties["fips"] == fips, "bid_id"])]
+    c1, c2 = st.columns(2)
+    c1.metric("Plans offered", f"{len(local):,}")
+    c2.metric("Special needs plans", f"{int(local['snp'].sum()):,}",
+              help="SNPs enrol only eligible people (dual-eligible, chronic condition or institutional).")
+    pct = st.column_config.NumberColumn(format="percent")
+    st.dataframe(
+        summary.assign(benefit=summary["benefit"].map(PLAN_BENEFITS)).rename(columns={
+            "benefit": "Benefit", "plans": "Plans", "share": "Share of plans",
+            "state_median": f"{state} county median", "us_median": "US county median"}),
+        hide_index=True, width="stretch",
+        column_config={
+            "Share of plans": st.column_config.ProgressColumn(min_value=0, max_value=1, format="percent"),
+            f"{state} county median": pct, "US county median": pct,
+        },
+    )
+    with st.expander(f"All {len(local)} plans"):
+        flags = {b: label for b, label in PLAN_BENEFITS.items() if b != "dental_any"}
+        st.dataframe(
+            local.sort_values(["organization", "plan_name"])[
+                ["plan_name", "organization", "plan_type", "snp", *flags]
+            ].rename(columns={"plan_name": "Plan", "organization": "Organization",
+                              "plan_type": "Type", "snp": "SNP", **flags}),
+            hide_index=True, width="stretch",
+            column_config={c: st.column_config.CheckboxColumn() for c in ["SNP", *flags.values()]},
+        )
+
+
+def _sites_map(local: pd.DataFrame, fips: str, year: int) -> None:
+    points = local.dropna(subset=["lat", "lon"]).assign(
+        label=lambda d: d["site_name"], org=lambda d: d["health_center"],
+        where=lambda d: d["address"].fillna("") + ", " + d["city"].fillna(""),
+    )[["lon", "lat", "label", "org", "where", "setting"]]
+    layers = [
+        _outline_layer(dl.selection_outline((fips,), year, by_state=False), "profile_county", 2),
+        pdk.Layer(
+            "ScatterplotLayer", data=points, id="hc_sites", get_position=["lon", "lat"],
+            get_fill_color=_hex_to_rgb(COMPOSITE_COLOR), get_line_color=[255, 255, 255, 255],
+            get_radius=6, radius_units='"pixels"', stroked=True, get_line_width=1.5,
+            line_width_units='"pixels"', pickable=True,
+        ),
+    ]
+    deck = pdk.Deck(
+        layers=layers, initial_view_state=view_state({fips}, True, padding=0.12),
+        map_provider="carto", map_style="light",
+        tooltip={
+            "html": "<div style='font-family:system-ui,sans-serif;font-size:12px;line-height:1.45'>"
+                    "<b>{label}</b><br/>{org}<br/>{where}<br/><span style='color:#52514e'>{setting}</span></div>",
+            "style": {"backgroundColor": "white", "color": INK_PRIMARY, "border": "1px solid #ccc",
+                      "borderRadius": "4px", "boxShadow": "0 1px 4px rgba(0,0,0,.2)", "maxWidth": "280px"},
+        },
+    )
+    st.pydeck_chart(deck, height=380, key="profile_sites_map")
+
+
+def _render_health_centers(
+    access: CountyAccess, fips: str, year: int, local: pd.DataFrame, orgs: pd.DataFrame,
+) -> None:
+    _section("Health centers (HRSA)",
+             "HRSA-funded health center and look-alike service delivery sites located in the county.")
+    if local.empty:
+        st.info("No HRSA health center service delivery sites are located in this county.")
+        return
+    c = st.columns(4)
+    c[0].metric("Sites", f"{len(local):,}")
+    c[1].metric("Organizations", f"{local['bhcmis_id'].nunique():,}")
+    c[2].metric("School-based", f"{int((local['setting'] == 'School').sum()):,}")
+    c[3].metric("Mobile vans", f"{int((local['location_type'] == 'Mobile Van').sum()):,}")
+
+    _render_uds_history(access.uds, orgs)
+
+    st.markdown(f"**Service delivery sites in this county ({len(local):,})**")
+    map_col, list_col = st.columns([2, 3])
+    with map_col:
+        _sites_map(local, fips, year)
+    with list_col:
+        st.dataframe(
+            local.sort_values(["health_center", "site_name"]).assign(
+                address=lambda d: d["address"].fillna("") + ", " + d["city"].fillna("") + " " + d["zip"].fillna("")
+            )[["site_name", "health_center", "address", "setting", "location_type", "hours_per_week"]]
+            .rename(columns={"site_name": "Site", "health_center": "Organization", "address": "Address",
+                             "setting": "Setting", "location_type": "Type", "hours_per_week": "Hours/week"}),
+            hide_index=True, width="stretch", height=380,
+            column_config={"Hours/week": st.column_config.NumberColumn(format="%.0f")},
+        )
+
+
+def _fmt_count(v) -> str:
+    return "—" if pd.isna(v) else f"{int(v):,}"
+
+
+def _published(values: list) -> list[float]:
+    known = [float(v) for _, v in values if pd.notna(v)]
+    return known if len(known) >= 2 else []
+
+
+def _change_since_first(values: list) -> str:
+    """Change from the first to the last published year, e.g. "+12% (2020→2025)"."""
+    known = [(y, v) for y, v in values if pd.notna(v)]
+    if len(known) < 2 or known[0][1] == 0:
+        return "—"
+    (y0, v0), (y1, v1) = known[0], known[-1]
+    return f"{(v1 - v0) / v0:+.0%} ({y0}→{y1})"
+
+
+def _render_uds_history(uds: pd.DataFrame, orgs: pd.DataFrame) -> None:
+    years = sorted(int(y) for y in uds["year"].unique())
+    st.markdown(f"**Dental and vision services by organization — UDS {years[0]}–{years[-1]}**")
+    services = list(UDS_SERVICES)
+    service = st.selectbox(
+        "Service", services, index=services.index("oral_exam_patients"),
+        format_func=UDS_SERVICES.get, key="uds_service",
+        help="Exams, sealants and fluoride count patients. Table 5 dental and vision totals are "
+             "withheld for most organizations before 2022.",
+    )
+    hist = model.uds_service_history(orgs, uds, service)
+    series = [list(zip(years, row)) for row in hist[years].itertuples(index=False)]
+    table = pd.DataFrame({
+        "Organization": hist["health_center"],
+        "Sites here": hist["sites_in_county"],
+        "All sites": hist["sites_total"],
+        **{str(y): hist[y].map(_fmt_count) for y in years},
+        # Sparklines can't show gaps, so they join the published years only.
+        "Trend": [_published(pts) for pts in series],
+        "Change": [_change_since_first(pts) for pts in series],
+    })
+    st.dataframe(
+        table, hide_index=True, width="stretch",
+        column_config={
+            **{str(y): st.column_config.TextColumn(alignment="right") for y in years},
+            "Trend": st.column_config.LineChartColumn(
+                width="small", help=f"Published years between {years[0]} and {years[-1]}"),
+            "Change": st.column_config.TextColumn(alignment="right"),
+        },
+    )
+
+    with st.expander("All services for one organization, year by year"):
+        names = dict(zip(orgs["bhcmis_id"], orgs["health_center"]))
+        if st.session_state.get("uds_org") not in names:
+            st.session_state["uds_org"] = orgs["bhcmis_id"].iloc[0]
+        org_id = st.selectbox("Organization", list(names), format_func=names.get, key="uds_org")
+        detail = model.uds_org_history(uds, org_id, services)
+        detail = detail.map(_fmt_count).rename(index=UDS_SERVICES)
+        detail.columns = [str(y) for y in detail.columns]
+        st.dataframe(
+            detail, width="stretch",
+            column_config={c: st.column_config.TextColumn(alignment="right") for c in detail.columns},
+        )
+
+    st.caption(
+        "UDS reports services per organization across all of its sites, including sites outside this "
+        "county; compare *Sites here* with *All sites* before reading the totals as county activity. "
+        "— means not published: the public UDS file withholds some counts (most Table 5 dental and "
+        "vision totals before 2022), an organization may not have reported that year, and look-alikes "
+        "report separately. UDS has no hearing or audiology service line."
+    )
+
+
+def render_county_profile(
+    fips: str, panel: pd.DataFrame, year: int, access: CountyAccess | None,
+) -> None:
+    county_rows = panel[panel["fips"] == fips]
+    year_all = panel[panel["year"] == year]
+    current = county_rows[county_rows["year"] == year]
+    if current.empty:
+        st.warning(f"No PLACES estimate for this county in {year}.")
+        return
+    r = current.iloc[0]
+    adults = r.get("adult_population")
+    st.markdown(f"### {r['county']}, {r['state_name']}")
+    st.caption(f"FIPS {fips} · {int(adults):,} adults · {year} BRFSS estimates, age-adjusted"
+               if pd.notna(adults) else f"FIPS {fips} · {year} BRFSS estimates, age-adjusted")
+    _profile_metrics(r, year_all[year_all["state"] == r["state"]], year_all)
+
+    local, orgs = (model.county_health_centers(access.sites, fips) if access is not None
+                   else (pd.DataFrame(), pd.DataFrame()))
+    trend_col, org_col = st.columns(2, gap="large")
+    with trend_col:
+        st.plotly_chart(
+            trend_chart(model.national_trend(county_rows), year,
+                        f"Prevalence trend — {r['county']}, {r['state']}"),
+            width="stretch",
+        )
+    with org_col:
+        if orgs.empty:
+            st.info("No HRSA health center organizations operate sites in this county."
+                    if access is not None else "Health center data is not built yet.")
+        else:
+            totals, reporting = model.uds_county_summary(orgs, access.uds, list(UDS_SERVICES))
+            st.plotly_chart(
+                uds_county_chart(totals, reporting, len(orgs),
+                                 f"Health center dental & vision services — {r['county']}, {r['state']}"),
+                width="stretch",
+            )
+            st.caption(
+                f"Estimated from the {len(orgs)} organizations with sites in the county: each one's "
+                "UDS count × its share of sites located here. Lines join years where all of them "
+                "published; open markers are years with unpublished counts, so those totals are "
+                "understated and not comparable."
+            )
+
+    st.divider()
+    if access is None:
+        st.info("Care-access data is not built yet. Run `python scripts/preprocess_access.py` to add "
+                "Medicaid benefits, Medicare Advantage plans and health center data.")
+        return
+    _render_health_centers(access, fips, year, local, orgs)
+    st.divider()
+    left, right = st.columns([2, 3], gap="large")
+    with left:
+        _render_medicaid(access.medicaid, r["state"], r["state_name"])
+    with right:
+        _render_ma_plans(access, fips, r["state"], year_all)
+
+    st.caption("Sources: " + " · ".join(f"[{name}]({url})" for name, url in ACCESS_SOURCES.values()))

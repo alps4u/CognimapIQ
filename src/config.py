@@ -10,6 +10,12 @@ DATA_DIR = ROOT / "data" / "processed"
 PLACES_PATH = DATA_DIR / "places_county.parquet"
 COUNTIES_PATH = DATA_DIR / "counties.parquet"
 FAVICON_PATH = ROOT / "assets" / "favicon.png"
+# Care-access snapshot (scripts/preprocess_access.py)
+MEDICAID_PATH = DATA_DIR / "medicaid_benefits.parquet"
+MA_PLANS_PATH = DATA_DIR / "ma_plans.parquet"
+MA_PLAN_COUNTIES_PATH = DATA_DIR / "ma_plan_counties.parquet"
+HC_SITES_PATH = DATA_DIR / "hc_sites.parquet"
+HC_UDS_PATH = DATA_DIR / "hc_uds.parquet"
 
 CRS = "EPSG:4326"
 
@@ -90,6 +96,37 @@ INK_PRIMARY = "#0b0b0b"
 INK_SECONDARY = "#52514e"
 INK_MUTED = "#898781"
 GRIDLINE = "#e1e0d9"
+
+
+# County profile: care-access measures and their sources.
+MEDICAID_BENEFITS = {  # KFF Medicaid Benefits Database topic -> label
+    "dental": "Adult dental",
+    "vision": "Eyeglasses",
+    "hearing": "Hearing aids",
+}
+PLAN_BENEFITS = {  # CMS PBP supplemental benefit flag -> label
+    "dental_any": "Dental (preventive or comprehensive)",
+    "dental_comprehensive": "Comprehensive dental",
+    "hearing_aids": "Hearing aids",
+    "eyewear": "Eyewear",
+}
+UDS_SERVICES = {  # HRSA UDS column -> label
+    "dental_patients": "Dental patients",
+    "dental_visits": "Dental visits",
+    "oral_exam_patients": "Oral exams",
+    "sealant_patients": "Sealants",
+    "fluoride_patients": "Fluoride",
+    "vision_patients": "Vision patients",
+    "vision_visits": "Vision visits",
+    "eye_exam_patients": "Eye exams",
+}
+ACCESS_SOURCES = {
+    "medicaid": ("KFF Medicaid Benefits Database", "https://www.kff.org/medicaid/state-indicator/dental-services/"),
+    "pbp": ("CMS Medicare Advantage Plan Benefit Package (PBP)",
+            "https://www.cms.gov/data-research/statistics-trends-and-reports/medicare-advantagepart-d-contract-and-enrollment-data/benefits-data"),
+    "sites": ("HRSA Health Center Service Delivery Sites", "https://data.hrsa.gov/data/download"),
+    "uds": ("HRSA Uniform Data System (UDS)", "https://data.hrsa.gov/data/download"),
+}
 
 
 @dataclass(frozen=True)

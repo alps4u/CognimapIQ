@@ -12,7 +12,16 @@ import shapely
 import streamlit as st
 from pyproj import Transformer
 
-from src.config import COUNTIES_PATH, CRS, PLACES_PATH
+from src.config import (
+    COUNTIES_PATH,
+    CRS,
+    HC_SITES_PATH,
+    HC_UDS_PATH,
+    MA_PLAN_COUNTIES_PATH,
+    MA_PLANS_PATH,
+    MEDICAID_PATH,
+    PLACES_PATH,
+)
 
 
 class SnapshotMissingError(FileNotFoundError):
@@ -26,7 +35,8 @@ class GeocodeError(RuntimeError):
 def _require(path) -> None:
     if not path.exists():
         raise SnapshotMissingError(
-            f"{path.name} not found. Build the snapshot first: python scripts/preprocess.py"
+            f"{path.name} not found. Build the snapshot first: python scripts/"
+            + ("preprocess_access.py" if path in ACCESS_PATHS else "preprocess.py")
         )
 
 
@@ -132,6 +142,46 @@ def selection_outline(fips: tuple[str, ...], year: int, by_state: bool) -> dict:
 def year_geojson(year: int) -> dict:
     """Year geometry as a plain GeoJSON dict (computed once per year)."""
     return json.loads(year_geometry(year).to_json(drop_id=True))
+
+
+# --------------------------------------------------------------------------- #
+# Care-access snapshot (Medicaid benefits, Medicare Advantage plans, health centers)
+# --------------------------------------------------------------------------- #
+ACCESS_PATHS = (MEDICAID_PATH, MA_PLANS_PATH, MA_PLAN_COUNTIES_PATH, HC_SITES_PATH, HC_UDS_PATH)
+
+
+def access_snapshot_ready() -> bool:
+    return all(p.exists() for p in ACCESS_PATHS)
+
+
+@st.cache_data(show_spinner=False)
+def load_medicaid_benefits() -> pd.DataFrame:
+    _require(MEDICAID_PATH)
+    return pd.read_parquet(MEDICAID_PATH)
+
+
+@st.cache_data(show_spinner=False)
+def load_ma_plans() -> pd.DataFrame:
+    _require(MA_PLANS_PATH)
+    return pd.read_parquet(MA_PLANS_PATH)
+
+
+@st.cache_data(show_spinner=False)
+def load_ma_plan_counties() -> pd.DataFrame:
+    _require(MA_PLAN_COUNTIES_PATH)
+    return pd.read_parquet(MA_PLAN_COUNTIES_PATH)
+
+
+@st.cache_data(show_spinner=False)
+def load_hc_sites() -> pd.DataFrame:
+    _require(HC_SITES_PATH)
+    return pd.read_parquet(HC_SITES_PATH)
+
+
+@st.cache_data(show_spinner=False)
+def load_hc_uds() -> pd.DataFrame:
+    _require(HC_UDS_PATH)
+    return pd.read_parquet(HC_UDS_PATH)
 
 
 # --------------------------------------------------------------------------- #
