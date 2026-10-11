@@ -16,6 +16,8 @@ MA_PLANS_PATH = DATA_DIR / "ma_plans.parquet"
 MA_PLAN_COUNTIES_PATH = DATA_DIR / "ma_plan_counties.parquet"
 HC_SITES_PATH = DATA_DIR / "hc_sites.parquet"
 HC_UDS_PATH = DATA_DIR / "hc_uds.parquet"
+NH_FACILITIES_PATH = DATA_DIR / "nh_facilities.parquet"
+SENIOR_COGNITION_PATH = DATA_DIR / "senior_cognition.parquet"
 
 CRS = "EPSG:4326"
 
@@ -32,7 +34,7 @@ MEASURE_LABELS = {
 MEASURE_DESCRIPTIONS = {
     "VISION": "Blindness or serious difficulty seeing, even with glasses (adults 18+).",
     "HEARING": "Deafness or serious difficulty hearing (adults 18+).",
-    "TEETHLOST": "All natural teeth lost — mastication proxy (adults 65+).",
+    "TEETHLOST": "All natural teeth lost, used as a mastication proxy (adults 65+).",
     "COGNITION": "Serious difficulty concentrating, remembering or making decisions (adults 18+).",
 }
 
@@ -120,12 +122,35 @@ UDS_SERVICES = {  # HRSA UDS column -> label
     "vision_visits": "Vision visits",
     "eye_exam_patients": "Eye exams",
 }
+# Nursing home dementia-care indicators (CMS Care Compare). `True` = higher is better.
+NH_MEASURES = {
+    "ls_antipsychotic": ("Long-stay residents on antipsychotics", False),
+    "ss_new_antipsychotic": ("Short-stay residents newly on antipsychotics", False),
+    "ls_antianxiety_hypnotic": ("Long-stay residents on antianxiety / hypnotic drugs", False),
+    "ls_restraint": ("Long-stay residents physically restrained", False),
+    "ls_depressive": ("Long-stay residents with depressive symptoms", False),
+    "ls_adl_decline": ("Long-stay residents needing more help with daily activities", False),
+    "ls_falls_major_injury": ("Long-stay residents with a fall causing major injury", False),
+}
+NH_CITATIONS = {  # survey citations per nursing home, last three inspection cycles
+    "cit_dementia_care": "Dementia care citations (F744)",
+    "cit_psychotropic_gdr": "Psychotropic dose-reduction citations (F758)",
+    "cit_chemical_restraint": "Unnecessary psychotropic citations (F605)",
+}
+NH_OTHER = {
+    "overall_rating": ("Overall star rating (1–5)", True),
+    "rn_hprd": ("RN hours per resident per day", True),
+}
+
 ACCESS_SOURCES = {
     "medicaid": ("KFF Medicaid Benefits Database", "https://www.kff.org/medicaid/state-indicator/dental-services/"),
     "pbp": ("CMS Medicare Advantage Plan Benefit Package (PBP)",
             "https://www.cms.gov/data-research/statistics-trends-and-reports/medicare-advantagepart-d-contract-and-enrollment-data/benefits-data"),
     "sites": ("HRSA Health Center Service Delivery Sites", "https://data.hrsa.gov/data/download"),
     "uds": ("HRSA Uniform Data System (UDS)", "https://data.hrsa.gov/data/download"),
+    "nh": ("CMS Care Compare nursing homes (Provider Data Catalog)",
+           "https://data.cms.gov/provider-data/topics/nursing-homes"),
+    "acs": ("US Census ACS 5-year, table B18104", "https://www.census.gov/programs-surveys/acs"),
 }
 
 

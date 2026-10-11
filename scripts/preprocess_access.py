@@ -10,6 +10,9 @@ snapshot (run scripts/preprocess.py first; county names and FIPS come from it):
     data/processed/ma_plan_counties.parquet   CMS PBP service areas: (bid_id, fips) pairs
     data/processed/hc_sites.parquet           HRSA health center service delivery sites
     data/processed/hc_uds.parquet             HRSA UDS dental / vision services by awardee and year
+    data/processed/nh_facilities.parquet      CMS Care Compare nursing homes: capacity, dementia-related
+                                              MDS quality measures and survey citations
+    data/processed/senior_cognition.parquet   ACS 5-year: adults 65+ with a cognitive difficulty
 
     python scripts/preprocess_access.py
 """
@@ -88,6 +91,34 @@ UDS_FIELDS = {
     "T6a_L31_Cb": "fluoride_patients",
     "T6a_L33_Cb": "oral_surgery_patients",
 }
+
+
+# --------------------------------------------------------------------------- #
+# CMS Care Compare nursing homes (Provider Data Catalog) and ACS senior cognition
+# --------------------------------------------------------------------------- #
+CMS_METASTORE = "https://data.cms.gov/provider-data/api/1/metastore/schemas/dataset/items/{id}"
+NH_DATASETS = {"provider": "4pq5-n9py", "mds": "djen-97ju", "citations": "r5ix-sfxw"}
+# MDS quality measures related to dementia care (four-quarter averages, %).
+NH_MDS_MEASURES = {
+    "481": "ls_antipsychotic",
+    "434": "ss_new_antipsychotic",
+    "452": "ls_antianxiety_hypnotic",
+    "409": "ls_restraint",
+    "408": "ls_depressive",
+    "401": "ls_adl_decline",
+    "410": "ls_falls_major_injury",
+}
+# Survey citations (F-tags) tied to dementia care and psychotropic medication use.
+NH_FTAGS = {"0744": "cit_dementia_care", "0758": "cit_psychotropic_gdr", "0605": "cit_chemical_restraint"}
+# Care Compare names Connecticut planning regions with abbreviations.
+CT_REGIONS = {
+    "capitol": "09110", "greater bridgeport": "09120", "lower ct river vly": "09130",
+    "naugatuck vly": "09140", "northeastern ct": "09150", "nw hills": "09160",
+    "south central ct": "09170", "southeastern ct": "09180", "western ct": "09190",
+}
+ACS_YEAR = 2023
+ACS_B18104_URL = (f"https://www2.census.gov/programs-surveys/acs/summary_file/{ACS_YEAR}/table-based-SF/"
+                  f"data/5YRData/acsdt5y{ACS_YEAR}-b18104.dat")
 
 
 def download(url: str, name: str) -> Path:
@@ -299,6 +330,105 @@ def build_uds() -> pd.DataFrame:
     return pd.concat([_uds_year(y) for y in UDS_YEARS], ignore_index=True)
 
 
+def _cms_download(dataset_id: str, name: str) -> Path:
+    """Latest CSV of a Provider Data Catalog dataset (file URLs change every release)."""
+    target = RAW_DIR / name
+    if not target.exists():
+        meta = requests.get(CMS_METASTORE.format(id=dataset_id), headers=HEADERS, timeout=60)
+        meta.raise_for_status()
+        dist = meta.json()["distribution"][0]
+        url = dist.get("downloadURL") or dist["data"]["downloadURL"]
+        download(url, name)
+    return target
+
+
+def _ssa_crosswalk(places: pd.DataFrame) -> dict[tuple[str, str], str]:
+    """(state, 3-digit SSA county code) -> FIPS, from the CMS PBP service-area file,
+    which lists SSA codes next to full county names."""
+    lookup = _county_lookup(places)
+    with zipfile.ZipFile(RAW_DIR / f"pbp-benefits-{PBP_YEAR}.zip") as zf:
+        area = _read_pbp(zf, "PlanArea.txt", usecols=["county_code", "county", "stcd"]).drop_duplicates()
+    out = {}
+    for st_, code, name in zip(area["stcd"], area["county_code"], area["county"]):
+        fips = _match_county(lookup, st_, name)
+        if fips:
+            out.setdefault((st_, code[2:]), fips)
+    return out
+
+
+def build_nursing_homes(places: pd.DataFrame) -> pd.DataFrame:
+    """One row per Medicare/Medicaid-certified nursing home with its county FIPS."""
+    prov = pd.read_csv(_cms_download(NH_DATASETS["provider"], "nh_provider_info.csv"), dtype=str, low_memory=False)
+    num = lambda c: pd.to_numeric(prov[c], errors="coerce")  # noqa: E731
+    lookup, ssa = _county_lookup(places), _ssa_crosswalk(places)
+
+    def fips_for(state: str, county: str, ssa_code: str) -> str | None:
+        if state == "CT":
+            return CT_REGIONS.get(str(county).lower())
+        if state == "DC":
+            return "11001"
+        return _match_county(lookup, state, county) or ssa.get((state, str(ssa_code).zfill(3)))
+
+    df = pd.DataFrame({
+        "ccn": prov["CMS Certification Number (CCN)"],
+        "name": prov["Provider Name"],
+        "city": prov["City/Town"],
+        "state": prov["State"],
+        "fips": [fips_for(s_, c, k) for s_, c, k in
+                 zip(prov["State"], prov["County/Parish"], prov["Provider SSA County Code"])],
+        "beds": num("Number of Certified Beds"),
+        "residents": num("Average Number of Residents per Day"),
+        "overall_rating": num("Overall Rating"),
+        "rn_hprd": num("Reported RN Staffing Hours per Resident per Day"),
+        "nurse_hprd": num("Reported Total Nurse Staffing Hours per Resident per Day"),
+        "lat": num("Latitude"),
+        "lon": num("Longitude"),
+    })
+    unmatched = df.loc[df["fips"].isna(), "state"].value_counts()
+    if len(unmatched):
+        print(f"  note: {int(unmatched.sum())} facilities without a county match "
+              f"({', '.join(f'{k} {v}' for k, v in unmatched.items())})")
+
+    mds = pd.read_csv(_cms_download(NH_DATASETS["mds"], "nh_mds_measures.csv"), dtype=str,
+                      usecols=["CMS Certification Number (CCN)", "Measure Code", "Four Quarter Average Score",
+                               "Measure Period"])
+    mds = mds[mds["Measure Code"].isin(NH_MDS_MEASURES)]
+    period = ", ".join(sorted(mds["Measure Period"].dropna().unique()))
+    wide = (mds.assign(score=pd.to_numeric(mds["Four Quarter Average Score"], errors="coerce"))
+            .pivot_table(index="CMS Certification Number (CCN)", columns="Measure Code", values="score")
+            .rename(columns=NH_MDS_MEASURES))
+    df = df.merge(wide, left_on="ccn", right_index=True, how="left")
+
+    cit = pd.read_csv(_cms_download(NH_DATASETS["citations"], "nh_health_citations.csv"), dtype=str,
+                      usecols=["CMS Certification Number (CCN)", "Deficiency Tag Number"])
+    counts = (cit[cit["Deficiency Tag Number"].isin(NH_FTAGS)]
+              .groupby(["CMS Certification Number (CCN)", "Deficiency Tag Number"]).size()
+              .unstack(fill_value=0).rename(columns=NH_FTAGS))
+    df = df.merge(counts, left_on="ccn", right_index=True, how="left")
+    for c in NH_FTAGS.values():
+        df[c] = df[c].fillna(0).astype(int)
+    df["mds_period"] = period
+    print(f"  MDS measure periods: {period}")
+    return df
+
+
+def build_senior_cognition() -> pd.DataFrame:
+    """ACS table B18104: adults 65+ and those with a cognitive difficulty, by county."""
+    path = download(ACS_B18104_URL, f"acs5y{ACS_YEAR}_b18104.dat")
+    raw = pd.read_csv(path, sep="|", dtype=str)
+    raw = raw[raw["GEO_ID"].str.startswith("0500000US")]
+    e = lambda n: pd.to_numeric(raw[f"B18104_E{n:03d}"], errors="coerce")  # noqa: E731
+    pop65 = e(12) + e(15) + e(28) + e(31)          # male/female 65-74 and 75+
+    cog65 = e(13) + e(16) + e(29) + e(32)          # ... with a cognitive difficulty
+    return pd.DataFrame({
+        "fips": raw["GEO_ID"].str[-5:].to_numpy(),
+        "pop65": pop65.astype("Int64").to_numpy(),
+        "cog65": cog65.astype("Int64").to_numpy(),
+        "cog65_rate": (cog65 / pop65 * 100).to_numpy(),
+        "acs_period": f"{ACS_YEAR - 4}–{ACS_YEAR}",
+    })
+
+
 def main() -> int:
     if not PLACES_PATH.exists():
         print("Run scripts/preprocess.py first (county names and FIPS come from the PLACES snapshot).")
@@ -312,23 +442,29 @@ def main() -> int:
         df.to_parquet(path, index=False)
         print(f"  wrote {path.relative_to(ROOT)} ({len(df):,} rows)")
 
-    print("[1/4] KFF Medicaid Benefits Database")
+    print("[1/6] KFF Medicaid Benefits Database")
     write(build_medicaid(states), "medicaid_benefits.parquet")
 
-    print(f"[2/4] CMS Medicare Advantage PBP {PBP_YEAR}")
+    print(f"[2/6] CMS Medicare Advantage PBP {PBP_YEAR}")
     plans, plan_counties = build_ma_plans(places)
     write(plans, "ma_plans.parquet")
     write(plan_counties, "ma_plan_counties.parquet")
 
-    print("[3/4] HRSA health center sites")
+    print("[3/6] HRSA health center sites")
     sites = build_hc_sites()
     write(sites, "hc_sites.parquet")
 
-    print(f"[4/4] HRSA UDS {UDS_YEARS[0]}–{UDS_YEARS[-1]} awardee services")
+    print(f"[4/6] HRSA UDS {UDS_YEARS[0]}–{UDS_YEARS[-1]} awardee services")
     uds = build_uds()
     write(uds, "hc_uds.parquet")
     linked = sites["bhcmis_id"].isin(uds["bhcmis_id"]).mean()
     print(f"  {linked:.0%} of sites link to a UDS awardee record")
+
+    print("[5/6] CMS Care Compare nursing homes")
+    write(build_nursing_homes(places), "nh_facilities.parquet")
+
+    print(f"[6/6] ACS {ACS_YEAR} 5-year: adults 65+ with a cognitive difficulty")
+    write(build_senior_cognition(), "senior_cognition.parquet")
     return 0
 
 

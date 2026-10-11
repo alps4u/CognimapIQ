@@ -36,6 +36,9 @@ from src.config import (
     MEASURE_DESCRIPTIONS,
     MEASURE_LABELS,
     MEDICAID_BENEFITS,
+    NH_CITATIONS,
+    NH_MEASURES,
+    NH_OTHER,
     NEUTRAL_FILL,
     NO_DATA_COLOR,
     OUTCOME_MEASURE,
@@ -142,7 +145,7 @@ def render_sidebar(states: pd.DataFrame) -> Controls:
     overlays: list[str] = []
     if map_mode == "overlay":
         for m in [OUTCOME_MEASURE, *SENSORY_MEASURES]:
-            if sb.checkbox(f"{MEASURE_LABELS[m]} — {OVERLAY_HINTS[m]}", value=True, key=f"ov_{m}"):
+            if sb.checkbox(f"{MEASURE_LABELS[m]} ({OVERLAY_HINTS[m]})", value=True, key=f"ov_{m}"):
                 overlays.append(m)
     pattern_top_pct = sb.select_slider(
         "Pattern threshold (top %)",
@@ -151,7 +154,8 @@ def render_sidebar(states: pd.DataFrame) -> Controls:
         format_func=lambda v: f"Top {v}%",
         disabled=map_mode != "overlay",
         help="Hatching / dots mark counties in this top share of each sensory measure "
-             "(pooled across years). Applies to the overlay view.",
+             "(pooled across years): cutoff = (100 − N)th percentile. Example: Top 25% marks counties "
+             "at or above the 75th percentile, i.e. the highest quarter of counties. Applies to the overlay view.",
     )
 
     sb.subheader(COMPOSITE_LABEL)
@@ -159,7 +163,9 @@ def render_sidebar(states: pd.DataFrame) -> Controls:
         "Weighting",
         ["Equal", "Custom"],
         horizontal=True,
-        help="Equal: each sensory domain counts the same. Custom: set policy weights yourself.",
+        help="SORI = weighted average of the vision, hearing and tooth-loss z-scores, then ranked 0–100. "
+             "Equal: each domain counts the same. Custom: weights are rescaled to sum to 1. Example: "
+             "sliders 1.0 / 0.5 / 0.5 become 50% / 25% / 25%, so vision counts twice as much as each other domain.",
     )
     custom = {m: 1.0 for m in SENSORY_MEASURES}
     if weight_mode == "Custom":
@@ -207,13 +213,16 @@ def render_lookup_result(
             st.warning(f"{match['county_name']} (FIPS {match['fips']}) has no PLACES estimate for {year}.")
         else:
             r = year_all.loc[year_all["fips"] == match["fips"]].iloc[0]
-            st.markdown(f"**{r['county']}, {r['state']}** · FIPS `{match['fips']}`")
+            st.markdown(f"**{r['county']}, {r['state']}** (FIPS `{match['fips']}`)")
             st.caption(match["matched_address"])
             score = r.get(COMPOSITE)
             st.metric(
                 f"{COMPOSITE_SHORT} ({year})", "–" if pd.isna(score) else f"{score:.0f}",
                 r.get("risk_tier") or None, delta_color="off", delta_arrow="off",
-                help="0–100 percentile of combined sensory burden, pooled across all years.",
+                help="0–100 rank of combined sensory burden (weighted vision, hearing and tooth-loss "
+                     "z-scores) against every county-year. Example: "
+                     + ("–" if pd.isna(score) else f"{score:.0f} means a heavier burden than {score:.0f}% "
+                        "of all county-years."),
             )
             for m in [OUTCOME_MEASURE, *SENSORY_MEASURES]:
                 v = r.get(m)
@@ -224,11 +233,11 @@ def render_lookup_result(
                 flag = ""
                 if m in SENSORY_MEASURES:
                     cutoff = percentile_cutoff(tuple(panel[m].astype(float)), 100 - top_pct)
-                    flag = f" · top {top_pct}%" if v >= cutoff else ""
-                st.progress(pct / 100, text=f"{MEASURE_LABELS[m]} {v:.1f}% · {_ordinal(pct)} pct{flag}")
+                    flag = f", top {top_pct}%" if v >= cutoff else ""
+                st.progress(pct / 100, text=f"{MEASURE_LABELS[m]} {v:.1f}% ({_ordinal(pct)} pct{flag})")
             st.caption(f"Percentile among US counties in {year}; higher = more prevalent.")
             if match["fips"] not in selected_fips:
-                st.caption("Outside the selected region — shown dimmed on the map.")
+                st.caption("Outside the selected region, so it is shown dimmed on the map.")
         if st.button("Clear lookup", key="clear_lookup", width="stretch"):
             st.session_state.pop("lookup", None)
             st.rerun()
@@ -241,16 +250,48 @@ def _fmt_pct(v: float) -> str:
     return "–" if pd.isna(v) else f"{v:.1f}%"
 
 
-def _delta(cur: float, prev: float | None, suffix: str = " pp") -> str | None:
+def _delta(cur: float, prev: float | None, vs: str, suffix: str = " pp") -> str | None:
+    """Change label naming its reference, e.g. "+0.2 pp (vs 2022)"."""
     if prev is None or pd.isna(cur) or pd.isna(prev):
         return None
     d = round(cur - prev, 1) + 0.0  # avoid "-0.0"
     if d == 0:
         return None  # e.g. biennial TEETHLOST carried forward
-    return f"{d:+.1f}{suffix}"
+    return f"{d:+.1f}{suffix} (vs {vs})"
 
 
-def render_kpis(stats: dict, prev: dict | None, region_label: str) -> None:
+def _vs(text: str, ref: str) -> str:
+    return f"{text} (vs {ref})"
+
+
+def _us_badge(container, value: float, us_value: float, higher_is_worse: bool = True) -> None:
+    """Second comparison under a metric whose delta is vs the state, styled like a
+    delta pill: "+0.5 pp (vs US)", red when worse, green when better."""
+    if pd.isna(value) or pd.isna(us_value):
+        return
+    d = round(value - us_value, 1) + 0.0
+    if d == 0:
+        text, fg, bg = "0.0 pp (vs US)", INK_SECONDARY, "rgba(49,51,63,0.08)"
+    else:
+        worse = (d > 0) == higher_is_worse
+        text = f"{'↑' if d > 0 else '↓'} {d:+.1f} pp (vs US)"
+        fg, bg = ("#bd2d2d", "rgba(255,75,75,0.12)") if worse else ("#177a3a", "rgba(33,195,84,0.12)")
+    # Pulled up under the metric's own delta pill (Streamlit adds a block gap between elements).
+    container.markdown(
+        f"<div style='margin-top:-0.85rem'><span style='display:inline-block;padding:0 0.45rem;"
+        f"border-radius:999px;background:{bg};color:{fg};font-size:0.8rem;line-height:1.5rem'>"
+        f"{text}</span></div>",
+        unsafe_allow_html=True,
+    )
+
+
+WEIGHTED_RATE_HELP = (
+    " Adult-population-weighted: Σ(county rate × adults) ÷ Σ adults. Example: counties of 100,000 adults "
+    "at 10% and 300,000 adults at 6% average (10 × 100,000 + 6 × 300,000) ÷ 400,000 = 7.0%, not 8.0%."
+)
+
+
+def render_kpis(stats: dict, prev: dict | None, region_label: str, prev_year: int | None = None) -> None:
     st.markdown(f"**{region_label}**")
     c = st.columns(6)
     c[0].metric(
@@ -259,16 +300,19 @@ def render_kpis(stats: dict, prev: dict | None, region_label: str) -> None:
     )
     c[1].metric(
         f"Avg. {COMPOSITE_SHORT}", "–" if pd.isna(stats["score_mean"]) else f"{stats['score_mean']:.0f}",
-        _delta(stats["score_mean"], prev and prev["score_mean"], ""),
+        _delta(stats["score_mean"], prev and prev["score_mean"], str(prev_year), ""),
         delta_color="inverse",
-        help=f"{COMPOSITE_LABEL}: 0–100 percentile of combined sensory burden, pooled across all years.",
+        help=f"{COMPOSITE_LABEL}: each sensory rate (vision, hearing, tooth loss) becomes a z-score, the z-scores are "
+            "averaged with the chosen weights, and the average is ranked 0–100 against every county-year. "
+             "The card shows the simple average of county scores. Example: a county scoring 82 has a "
+             "higher combined sensory burden than 82% of all county-years; an average of 50 is typical.",
     )
     for col, m in zip(c[2:], [OUTCOME_MEASURE, *SENSORY_MEASURES]):
         col.metric(
             MEASURE_LABELS[m], _fmt_pct(stats[m]),
-            _delta(stats[m], prev and prev[m]),
+            _delta(stats[m], prev and prev[m], str(prev_year)),
             delta_color="inverse",
-            help=MEASURE_DESCRIPTIONS[m] + " Adult-population-weighted.",
+            help=MEASURE_DESCRIPTIONS[m] + WEIGHTED_RATE_HELP,
         )
 
 
@@ -390,7 +434,7 @@ TOOLTIP_HTML = (
     + COMPOSITE_SHORT + ": <b>{score_txt}</b> ({tier})<br/>"
     "<hr style='margin:4px 0;border:0;border-top:1px solid #ddd'/>"
     "Cognitive decline: <b>{COGNITION_txt}</b><br/>"
-    "Vision: {VISION_txt} · Hearing: {HEARING_txt}<br/>"
+    "Vision: {VISION_txt}<br/>Hearing: {HEARING_txt}<br/>"
     "Complete tooth loss (65+): {TEETHLOST_txt}<br/>"
     "Adults: {adults}</div>"
 )
@@ -751,6 +795,9 @@ def _spread(ys: list[float], gap: float, lo: float, hi: float) -> list[float]:
     return [y for c in clusters for y in place(c)]
 
 
+LABEL_MARGIN_PX = 120  # right margin that holds line-end labels in narrow charts
+
+
 def _add_end_labels(
     fig: go.Figure, x: str, labels: list[tuple[float, str, str]], y_top: float, plot_px: float,
     gap_px: float = 15,
@@ -804,7 +851,7 @@ def trend_chart(trend: pd.DataFrame, current_year: int, title: str) -> go.Figure
         fig.add_annotation(
             x=ev.date, y=1.0, yref="paper", text=f"<b>{i + 1}</b>", showarrow=False,
             yanchor="bottom", font=dict(size=11, color=INK_PRIMARY),
-            hovertext=f"{ev.date} · {ev.title}",
+            hovertext=f"{ev.date}: {ev.title}",
         )
     _base_layout(
         fig,
@@ -814,6 +861,7 @@ def trend_chart(trend: pd.DataFrame, current_year: int, title: str) -> go.Figure
         xaxis=dict(range=[f"{min(years) - 1}-06-01", "2025-01-31"], tickformat="%Y", dtick="M12"),
         yaxis=dict(title="Adult prevalence (%)", range=[0, y_top]),
     )
+    fig.update_layout(margin=dict(r=LABEL_MARGIN_PX))  # line-end labels may run past the plot area
     return fig
 
 
@@ -865,17 +913,19 @@ def uds_county_chart(totals: pd.DataFrame, reporting: pd.DataFrame, n_orgs: int,
         last = max(i for i, v in enumerate(values) if v is not None)
         labels.append((values[last], label, color))
     y_top = max(float(totals.max().max()) * 1.12, 1) if totals.notna().any().any() else 1
-    _add_end_labels(fig, x[-1], labels, y_top, plot_px=230)
+    # Sits in a narrow column: the coloured line-end labels name the services, so no
+    # legend (eight entries would crowd out the plot); hover still shows each name.
+    _add_end_labels(fig, x[-1], labels, y_top, plot_px=300)
     _base_layout(
-        fig,
+        fig, height=380, showlegend=False,
         title=dict(text=title, font=dict(size=14, color=INK_PRIMARY), x=0, y=0.98),
         hovermode="x unified",
-        legend=dict(orientation="h", y=-0.12, x=0),
-        # room on the right for the label column; ticks only on data years
-        xaxis=dict(range=[f"{min(years) - 1}-06-01", f"{max(years) + 2}-03-01"],
-                   tickvals=x, ticktext=[str(y) for y in years]),
-        yaxis=dict(title="Patients / visits (estimated, county)", range=[0, y_top]),
+        # ticks only on data years, short form so they fit; labels sit in the right margin
+        xaxis=dict(range=[f"{min(years) - 1}-06-01", f"{max(years)}-12-31"],
+                   tickvals=x, ticktext=[f"'{y % 100:02d}" for y in years], tickangle=0),
+        yaxis=dict(title="Patients / visits (est.)", range=[0, y_top]),
     )
+    fig.update_layout(margin=dict(r=100))
     return fig
 
 
@@ -1006,13 +1056,14 @@ def render_scenario(result: ScenarioResult | None) -> None:
     c[0].metric("Expected cognitive decline (baseline)", f"{result.baseline_rate:.2f}%")
     c[1].metric(
         "Expected under scenario", f"{result.scenario_rate:.2f}%",
-        f"{result.delta_pp:+.2f} pp", delta_color="inverse",
+        _vs(f"{result.delta_pp:+.2f} pp", "baseline"), delta_color="inverse",
     )
     c[2].metric(
         "Adults with cognitive difficulty potentially averted",
         f"{result.adults_averted:,.0f}",
-        help="Association-based estimate: change in model-expected prevalence × adult population. "
-             "Indicative only — not a causal effect size.",
+        help="Association-based estimate: Σ (drop in model-expected prevalence × adult population) over "
+             "counties. Example: a 0.40 pp drop in a county of 500,000 adults ≈ 0.004 × 500,000 = 2,000 adults. "
+             "Indicative only, not a causal effect size.",
     )
     top = result.per_county.sort_values("adults_averted", ascending=False).head(15)
     st.markdown("**Where preventative investment reaches the most people (top 15 counties)**")
@@ -1062,6 +1113,14 @@ def render_priority_table(df: pd.DataFrame, top_n: int) -> pd.DataFrame:
 # County profile
 # --------------------------------------------------------------------------- #
 @dataclass
+class NursingHomes:
+    facilities: pd.DataFrame
+    by_fips: pd.DataFrame   # model.nh_summaries
+    by_state: pd.DataFrame
+    us: dict
+
+
+@dataclass
 class CountyAccess:
     medicaid: pd.DataFrame
     plans: pd.DataFrame
@@ -1069,6 +1128,7 @@ class CountyAccess:
     plan_shares: pd.DataFrame
     sites: pd.DataFrame
     uds: pd.DataFrame
+    nursing_homes: NursingHomes | None = None
 
 
 def _show_county(fips: str, state: str) -> None:
@@ -1080,10 +1140,10 @@ def _county_name(year_all: pd.DataFrame, fips: str) -> str:
     return f"{r['county']}, {r['state']}"
 
 
-def render_county_picker(year_all: pd.DataFrame, top_fips: str | None, pin: dict | None) -> str:
+def render_county_picker(year_all: pd.DataFrame, pin: dict | None) -> str:
     """State + county selectors for the profile tab (session keys `profile_state` /
     `profile_fips`, seeded by the caller with the top Intervention priority county),
-    plus shortcuts back to that county and to the address-lookup county."""
+    plus a shortcut to the address-lookup county."""
     states = year_all[["state", "state_name"]].drop_duplicates().sort_values("state_name")
     names = dict(zip(states["state"], states["state_name"]))
     c1, c2 = st.columns([1, 2])
@@ -1101,16 +1161,10 @@ def render_county_picker(year_all: pd.DataFrame, top_fips: str | None, pin: dict
         help="Defaults to the first county in the Intervention priority table.",
     )
 
-    shortcuts = []
-    if top_fips and top_fips != fips:
-        shortcuts.append((f"↺ Top priority: {_county_name(year_all, top_fips)}", top_fips, "profile_top"))
     if pin and pin["state"] and pin["fips"] != fips:
-        shortcuts.append((f"📍 Looked-up: {_county_name(year_all, pin['fips'])}", pin["fips"], "profile_pin"))
-    if shortcuts:
-        cols = st.columns(len(shortcuts) + 1)
-        for col, (label, target, key) in zip(cols, shortcuts):
-            state_of = year_all.loc[year_all["fips"] == target, "state"].iloc[0]
-            col.button(label, key=key, on_click=_show_county, args=(target, state_of), width="stretch")
+        col, _ = st.columns([1, 2])
+        col.button(f"📍 Looked-up: {_county_name(year_all, pin['fips'])}", key="profile_pin",
+                   on_click=_show_county, args=(pin["fips"], pin["state"]), width="stretch")
     return fips
 
 
@@ -1126,19 +1180,27 @@ def _profile_metrics(r: pd.Series, state_rows: pd.DataFrame, year_all: pd.DataFr
     c[0].metric(
         COMPOSITE_SHORT, "–" if pd.isna(score) else f"{score:.0f}", r.get("risk_tier") or None,
         delta_color="off", delta_arrow="off",
-        help=f"{COMPOSITE_LABEL}: 0–100 percentile of combined sensory burden, pooled across all years.",
+        help=f"{COMPOSITE_LABEL}: each sensory rate (vision, hearing, tooth loss) becomes a z-score, the z-scores are "
+            "averaged with the chosen weights, and the average is ranked 0–100 against every county-year. "
+             + ("" if pd.isna(score) else f"Example: {score:.0f} means this county's combined sensory burden "
+                f"is heavier than {score:.0f}% of all county-years."),
     )
     for col, m in zip(c[1:], [OUTCOME_MEASURE, *SENSORY_MEASURES]):
         v = r.get(m)
         state_avg = weighted_mean(state_rows[m], state_rows["adult_population"])
+        us_avg = weighted_mean(year_all[m], year_all["adult_population"])
         pct = (year_all[m].dropna() <= v).mean() * 100 if pd.notna(v) else float("nan")
         col.metric(
             MEASURE_LABELS[m], _fmt_pct(v),
-            None if pd.isna(v) or pd.isna(state_avg) else f"{v - state_avg:+.1f} pp vs {r['state']}",
+            _delta(v, state_avg, r["state"]),
             delta_color="inverse",
-            help=f"{MEASURE_DESCRIPTIONS[m]} National percentile: {pct:.0f}." if pd.notna(pct)
+            help=(f"{MEASURE_DESCRIPTIONS[m]} Change = county rate − adult-weighted average: "
+                  f"vs {r['state']} {v:.1f}% − {state_avg:.1f}% = {v - state_avg:+.1f} pp; "
+                  f"vs US {v:.1f}% − {us_avg:.1f}% = {v - us_avg:+.1f} pp. National percentile {pct:.0f}: "
+                  f"the rate is at or above that of {pct:.0f}% of US counties.") if pd.notna(pct)
             else MEASURE_DESCRIPTIONS[m],
         )
+        _us_badge(col, v, us_avg)
 
 
 _MEDICAID_STATUS = {"Yes": "✓ Covered", "No": "✕ Not covered", "NR": "– Not reported"}
@@ -1147,7 +1209,7 @@ _MEDICAID_STATUS = {"Yes": "✓ Covered", "No": "✕ Not covered", "NR": "– No
 def _render_medicaid(medicaid: pd.DataFrame, state: str, state_name: str) -> None:
     rows = medicaid[medicaid["state"] == state].set_index("benefit")
     year = int(medicaid["survey_year"].max())
-    _section(f"{state_name} Medicaid — adult benefits",
+    _section(f"{state_name} Medicaid adult benefits",
              f"KFF Medicaid Benefits Database, {year} survey (state-reported fee-for-service coverage "
              "for categorically needy adults). Coverage may have changed since.")
     items = []
@@ -1191,15 +1253,20 @@ def _render_ma_plans(access: CountyAccess, fips: str, state: str, year_all: pd.D
     c1.metric("Plans offered", f"{len(local):,}")
     c2.metric("Special needs plans", f"{int(local['snp'].sum()):,}",
               help="SNPs enrol only eligible people (dual-eligible, chronic condition or institutional).")
-    pct = st.column_config.NumberColumn(format="percent")
     st.dataframe(
         summary.assign(benefit=summary["benefit"].map(PLAN_BENEFITS)).rename(columns={
             "benefit": "Benefit", "plans": "Plans", "share": "Share of plans",
             "state_median": f"{state} county median", "us_median": "US county median"}),
         hide_index=True, width="stretch",
         column_config={
-            "Share of plans": st.column_config.ProgressColumn(min_value=0, max_value=1, format="percent"),
-            f"{state} county median": pct, "US county median": pct,
+            "Share of plans": st.column_config.ProgressColumn(
+                min_value=0, max_value=1, format="percent",
+                help="Plans offering the benefit ÷ plans offered in the county. Example: 40 of 52 plans = 77%."),
+            f"{state} county median": st.column_config.NumberColumn(
+                format="percent", help=f"Middle value of the same share across {state} counties: half of "
+                                       "the counties are above it, half below."),
+            "US county median": st.column_config.NumberColumn(
+                format="percent", help="Middle value of the same share across all US counties."),
         },
     )
     with st.expander(f"All {len(local)} plans"):
@@ -1241,8 +1308,32 @@ def _sites_map(local: pd.DataFrame, fips: str, year: int) -> None:
     st.pydeck_chart(deck, height=380, key="profile_sites_map")
 
 
+def _render_county_uds_summary(access: CountyAccess, orgs: pd.DataFrame, place: str) -> None:
+    totals, reporting = model.uds_county_summary(orgs, access.uds, list(UDS_SERVICES))
+    st.plotly_chart(uds_county_chart(totals, reporting, len(orgs),
+                                     f"All services, all organizations in {place} (est.)"),
+                    width="stretch")
+    latest = access.uds[access.uds["year"] == access.uds["year"].max()]
+    ex = (orgs.merge(latest[["bhcmis_id", "oral_exam_patients"]], on="bhcmis_id")
+          .dropna(subset=["oral_exam_patients"]).head(1))
+    example = ""
+    if not ex.empty:
+        e = ex.iloc[0]
+        example = (f" Example: {e['health_center'].title()} reported {int(e['oral_exam_patients']):,} oral "
+                   f"exams with {int(e['sites_in_county'])} of its {int(e['sites_total'])} sites here → "
+                   f"{int(e['oral_exam_patients']):,} × {int(e['sites_in_county'])}/{int(e['sites_total'])} ≈ "
+                   f"{e['oral_exam_patients'] * e['sites_in_county'] / e['sites_total']:,.0f} counted for the county.")
+    st.caption(
+        (f"Estimated from the {len(orgs)} organizations with sites in the county: each one's "
+         if len(orgs) != 1 else "Estimated from the one organization with sites in the county: its ")
+        + "UDS count × its share of sites located here. Lines join years where all of them "
+        "published; open markers are years with unpublished counts, so those totals are "
+        "understated and not comparable." + example
+    )
+
+
 def _render_health_centers(
-    access: CountyAccess, fips: str, year: int, local: pd.DataFrame, orgs: pd.DataFrame,
+    access: CountyAccess, fips: str, year: int, local: pd.DataFrame, orgs: pd.DataFrame, place: str,
 ) -> None:
     _section("Health centers (HRSA)",
              "HRSA-funded health center and look-alike service delivery sites located in the county.")
@@ -1274,7 +1365,7 @@ def _render_health_centers(
 
 
 def _fmt_count(v) -> str:
-    return "—" if pd.isna(v) else f"{int(v):,}"
+    return "–" if pd.isna(v) else f"{int(v):,}"
 
 
 def _published(values: list) -> list[float]:
@@ -1286,14 +1377,14 @@ def _change_since_first(values: list) -> str:
     """Change from the first to the last published year, e.g. "+12% (2020→2025)"."""
     known = [(y, v) for y, v in values if pd.notna(v)]
     if len(known) < 2 or known[0][1] == 0:
-        return "—"
+        return "–"
     (y0, v0), (y1, v1) = known[0], known[-1]
-    return f"{(v1 - v0) / v0:+.0%} ({y0}→{y1})"
+    return f"{(v1 - v0) / v0:+.0%} ({y1} vs {y0})"
 
 
 def _render_uds_history(uds: pd.DataFrame, orgs: pd.DataFrame) -> None:
     years = sorted(int(y) for y in uds["year"].unique())
-    st.markdown(f"**Dental and vision services by organization — UDS {years[0]}–{years[-1]}**")
+    st.markdown(f"**Dental and vision services by organization (UDS {years[0]}–{years[-1]})**")
     services = list(UDS_SERVICES)
     service = st.selectbox(
         "Service", services, index=services.index("oral_exam_patients"),
@@ -1318,7 +1409,10 @@ def _render_uds_history(uds: pd.DataFrame, orgs: pd.DataFrame) -> None:
             **{str(y): st.column_config.TextColumn(alignment="right") for y in years},
             "Trend": st.column_config.LineChartColumn(
                 width="small", help=f"Published years between {years[0]} and {years[-1]}"),
-            "Change": st.column_config.TextColumn(alignment="right"),
+            "Change": st.column_config.TextColumn(
+                alignment="right",
+                help="(last published value − first published value) ÷ first. Example: 758 in 2020 and "
+                     "1,292 in 2025 → (1,292 − 758) ÷ 758 = +70% (2025 vs 2020)."),
         },
     )
 
@@ -1338,9 +1432,235 @@ def _render_uds_history(uds: pd.DataFrame, orgs: pd.DataFrame) -> None:
     st.caption(
         "UDS reports services per organization across all of its sites, including sites outside this "
         "county; compare *Sites here* with *All sites* before reading the totals as county activity. "
-        "— means not published: the public UDS file withholds some counts (most Table 5 dental and "
-        "vision totals before 2022), an organization may not have reported that year, and look-alikes "
+        "A dash (–) means not published: the public UDS file withholds some counts (most Table 5 "
+        "dental and vision totals before 2022), an organization may not have reported that year, and look-alikes "
         "report separately. UDS has no hearing or audiology service line."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Nursing homes and dementia care
+# --------------------------------------------------------------------------- #
+# Cell colours shared with the delta badges under the metrics.
+WORSE_STYLE = "color:#bd2d2d;background-color:rgba(255,75,75,0.12)"
+BETTER_STYLE = "color:#177a3a;background-color:rgba(33,195,84,0.12)"
+
+
+def _diff_cell(value: float, ref: float, higher_better: bool, unit: str) -> tuple[str, str]:
+    """Difference from a reference with an arrow, e.g. "↑ +1.8 pp", and its status:
+    "worse" / "better", or "" when missing or within ±10% of the reference."""
+    if pd.isna(value) or pd.isna(ref):
+        return "–", ""
+    d = value - ref
+    text = f"{d:+.1f} pp" if unit == "%" else f"{d:+.2f}"
+    if text.lstrip("+-").strip("0. p") == "":  # rounds to zero
+        return text.lstrip("+-"), ""
+    arrow = "↑" if d > 0 else "↓"
+    if abs(d) <= max(abs(ref) * 0.10, 0.05):
+        return f"{arrow} {text}", ""
+    better = (d > 0) == higher_better
+    return f"{arrow} {text}", "better" if better else "worse"
+
+
+def _nh_comparison(county: pd.Series, state: pd.Series | None, us: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Indicator table (county, then each reference preceded by the county's difference
+    from it) plus a same-shaped frame of "worse" / "better" flags for colouring the
+    difference and reference cells."""
+    rows, flags = [], []
+    items = [(k, label, hb, "%") for k, (label, hb) in NH_MEASURES.items()]
+    items += [(k, label, False, "per home") for k, label in NH_CITATIONS.items()]
+    items += [(k, label, hb, "") for k, (label, hb) in NH_OTHER.items()]
+    for key, label, higher_better, unit in items:
+        def fmt(v):
+            if v is None or pd.isna(v):
+                return "–"
+            return f"{v:.1f}%" if unit == "%" else f"{v:.2f}"
+        c, st_v, us_v = county.get(key), (state.get(key) if state is not None else None), us.get(key)
+        vs_state, state_flag = _diff_cell(c, st_v if st_v is not None else float("nan"), higher_better, unit)
+        vs_us, us_flag = _diff_cell(c, us_v, higher_better, unit)
+        rows.append({"Indicator": label, "County": fmt(c), "vs State": vs_state, "State": fmt(st_v),
+                     "vs US": vs_us, "US": fmt(us_v)})
+        # each reference value is coloured like its comparison cell
+        flags.append({"vs State": state_flag, "State": state_flag, "vs US": us_flag, "US": us_flag})
+    table = pd.DataFrame(rows)
+    status = pd.DataFrame(flags).reindex(columns=table.columns, fill_value="")
+    return table, status
+
+
+def _style_flags(table: pd.DataFrame, status: pd.DataFrame):
+    styles = status.replace({"worse": WORSE_STYLE, "better": BETTER_STYLE})
+    return table.style.apply(lambda _: styles, axis=None)
+
+
+def nh_burden_chart(by_fips: pd.DataFrame, names: dict[str, str], state_fips: set[str], fips: str,
+                    us: dict, title: str) -> go.Figure:
+    """Counties of one state: cognitive difficulty among adults 65+ against long-stay
+    antipsychotic use in their nursing homes; dashed lines are US references."""
+    d = by_fips.loc[by_fips.index.isin(state_fips)].dropna(subset=["cog65_rate", "ls_antipsychotic"])
+    others, me = d[d.index != fips], d[d.index == fips]
+    size = lambda b: (6 + 16 * np.sqrt(b / max(d["beds"].max(), 1))).tolist()  # noqa: E731
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=others["cog65_rate"], y=others["ls_antipsychotic"], mode="markers", name="Other counties",
+        marker=dict(size=size(others["beds"]), color=GRIDLINE, line=dict(color=INK_MUTED, width=1)),
+        text=[names.get(f, f) for f in others.index], customdata=others["beds"],
+        hovertemplate="%{text}<br>65+ cognitive difficulty %{x:.1f}%<br>"
+                      "Antipsychotics %{y:.1f}%<br>%{customdata:,.0f} beds<extra></extra>",
+    ))
+    if len(me):
+        fig.add_trace(go.Scatter(
+            x=me["cog65_rate"], y=me["ls_antipsychotic"], mode="markers+text", name=names.get(fips, fips),
+            marker=dict(size=size(me["beds"]), color=COMPOSITE_COLOR, line=dict(color="white", width=2)),
+            text=[names.get(fips, fips)], textposition="top center",
+            textfont=dict(color=COMPOSITE_COLOR, size=12),
+            hovertemplate="65+ cognitive difficulty %{x:.1f}%<br>Antipsychotics %{y:.1f}%<extra></extra>",
+        ))
+    ref = dict(color=INK_MUTED, width=1, dash="dash")
+    fig.add_vline(x=us["county_median_cog65_rate"], line=ref)  # US county median
+    fig.add_hline(y=us["ls_antipsychotic"], line=ref)           # US resident-weighted average
+    fig.add_annotation(xref="paper", yref="paper", x=1, y=1, xanchor="right", yanchor="top", showarrow=False,
+                       text="Higher burden, more antipsychotic use", font=dict(size=11, color=INK_SECONDARY))
+    _base_layout(
+        fig, height=380, showlegend=False,
+        title=dict(text=title, font=dict(size=14, color=INK_PRIMARY), x=0, y=0.98),
+        xaxis=dict(title="Adults 65+ with a cognitive difficulty (%)", showgrid=True, gridcolor=GRIDLINE),
+        yaxis=dict(title="Long-stay residents on antipsychotics (%)", rangemode="tozero"),
+    )
+    return fig
+
+
+def _nh_findings(name: str, c: pd.Series, us: dict, cog_pct: float) -> list[str]:
+    """Short policy reading of the county against national references."""
+    out = [f"**{name}**: {c['cog65_rate']:.1f}% of adults 65+ report a cognitive difficulty "
+           f"(US {us['cog65_rate']:.1f}%; {_ordinal(round(cog_pct))} percentile of counties)."]
+    if c.get("facilities", 0) == 0:
+        out.append("No certified nursing home is located in the county, so residents needing "
+                   "dementia care must be placed elsewhere.")
+        return out
+    n = int(c["facilities"])
+    homes = "Its nursing home has" if n == 1 else f"Its {n} nursing homes have"
+    out.append(f"{homes} {c['beds_per_100_cog65']:.0f} certified beds per "
+               f"100 older adults with a cognitive difficulty (US {us['beds_per_100_cog65']:.0f}) and give "
+               f"antipsychotics to {c['ls_antipsychotic']:.1f}% of long-stay residents (US {us['ls_antipsychotic']:.1f}%).")
+    high_burden = c["cog65_rate"] > us["county_median_cog65_rate"]
+    if high_burden and c["ls_antipsychotic"] > us["ls_antipsychotic"] * 1.1:
+        out.append("⚠️ **Dementia-care priority:** above-median cognitive burden with above-average "
+                   "antipsychotic use, a target for dementia-care training and non-drug behavioural care.")
+    if high_burden and c["beds_per_100_cog65"] < us["beds_per_100_cog65"] * 0.9:
+        out.append("⚠️ **Capacity gap:** fewer nursing home beds per older adult with a cognitive "
+                   "difficulty than the US; prioritise home- and community-based dementia services.")
+    if c.get("cit_dementia_care", 0) > us["cit_dementia_care"] * 1.5 and c["cit_dementia_care"] > 0:
+        out.append("⚠️ Dementia-care (F744) citations per home exceed 1.5× the US rate.")
+    return out
+
+
+def _render_nursing_homes(nh: NursingHomes | None, fips: str, r: pd.Series, year_all: pd.DataFrame) -> None:
+    _section("Nursing homes & dementia care (CMS)",
+             "Medicare- and Medicaid-certified nursing homes in the county set against older adults with "
+             "a cognitive difficulty. Quality measures are resident-weighted averages.")
+    if nh is None:
+        st.info("Nursing home data is not built yet. Run `python scripts/preprocess_access.py`.")
+        return
+    if fips not in nh.by_fips.index or pd.isna(nh.by_fips.loc[fips, "cog65_rate"]):
+        st.info("No ACS estimate of older adults with a cognitive difficulty for this county.")
+        return
+    c = nh.by_fips.loc[fips]
+    state = nh.by_state.loc[fips[:2]] if fips[:2] in nh.by_state.index else None
+    us = nh.us
+    cog_pct = (nh.by_fips["cog65_rate"].dropna() <= c["cog65_rate"]).mean() * 100
+
+    m = st.columns(5)
+    m[0].metric(
+        "65+ cognitive difficulty", f"{c['cog65_rate']:.1f}%",
+        None if state is None else _delta(c["cog65_rate"], state["cog65_rate"], r["state"]),
+        delta_color="inverse",
+        help=(f"Adults 65+ with a cognitive difficulty ÷ all adults 65+ × 100 (ACS 5-year, table B18104). "
+              f"Here: {int(c['cog65']):,} ÷ {int(c['pop65']):,} × 100 = {c['cog65_rate']:.1f}%, about 1 in "
+              f"{max(round(100 / c['cog65_rate']), 1) if c['cog65_rate'] else '–'} older adults. "
+              f"vs US: {c['cog65_rate']:.1f}% − {us['cog65_rate']:.1f}% = "
+              f"{c['cog65_rate'] - us['cog65_rate']:+.1f} pp."),
+    )
+    _us_badge(m[0], c["cog65_rate"], us["cog65_rate"])
+    m[1].metric("Nursing homes", f"{int(c['facilities']):,}")
+    m[2].metric("Certified beds", f"{int(c['beds']):,}",
+                help=None if c["facilities"] == 0 else
+                f"Occupancy = average residents per day ÷ certified beds. Here: {c['residents']:,.0f} ÷ "
+                f"{int(c['beds']):,} = {c['residents'] / c['beds']:.0%} of beds in use on a typical day.")
+    m[3].metric("Beds per 100 at-risk seniors",
+                "–" if pd.isna(c["beds_per_100_cog65"]) else f"{c['beds_per_100_cog65']:.0f}",
+                None if pd.isna(c["beds_per_100_cog65"]) else
+                _vs(f"{c['beds_per_100_cog65'] - us['beds_per_100_cog65']:+.0f}", "US"),
+                delta_color="normal",  # fewer beds than the US = capacity gap (red), as in the findings
+                help=("Certified nursing home beds ÷ adults 65+ with a cognitive difficulty × 100. "
+                      + ("" if pd.isna(c["beds_per_100_cog65"]) else
+                         f"Here: {int(c['beds']):,} ÷ {int(c['cog65']):,} × 100 = {c['beds_per_100_cog65']:.0f}, "
+                         f"i.e. about {c['beds_per_100_cog65']:.0f} beds for every 100 such seniors "
+                         f"(US {us['beds_per_100_cog65']:.0f}). ")
+                      + "Green: more beds than the US, red: fewer (a capacity gap). Not all residents have "
+                        "dementia and not all people with dementia need a nursing home; read as capacity context."))
+    m[4].metric("Avg. overall rating", "–" if pd.isna(c.get("overall_rating")) else f"{c['overall_rating']:.1f} ★",
+                None if pd.isna(c.get("overall_rating")) else
+                _vs(f"{c['overall_rating'] - us['overall_rating']:+.1f}", "US"),
+                delta_color="normal",
+                help="Resident-weighted CMS overall star rating: Σ(stars × residents) ÷ Σ residents. Example: "
+                     "a 5★ home with 100 residents and a 2★ home with 50 average (5 × 100 + 2 × 50) ÷ 150 = 4.0★.")
+
+    for line in _nh_findings(f"{r['county']}, {r['state']}", c, us, cog_pct):
+        st.markdown(line)
+
+    with st.container():
+        st.markdown("**Dementia-care indicators**")
+        if c["facilities"] == 0:
+            st.info("No nursing homes in the county to report on.")
+        else:
+            table, status = _nh_comparison(c, state, us)
+            weighted = ("Resident-weighted: Σ(home's score × its residents) ÷ Σ residents. Example: 10% in a "
+                        "home of 100 residents and 20% in one of 50 → (10 × 100 + 20 × 50) ÷ 150 = 13.3%. "
+                        "Citation rows: citations ÷ homes.")
+            diff_help = ("County − {ref}. Red: the county is worse, green: better (direction depends on the "
+                         "indicator; lower is better except star rating and RN hours). The {ref} value cell takes "
+                         "the same colour; within ±10% of it both stay uncoloured. Example: 17.0% vs {ref} 15.2% "
+                         "→ ↑ +1.8 pp, 12% higher, red for antipsychotic use.")
+            st.dataframe(_style_flags(table, status), hide_index=True, width="stretch",
+                         height=35 * (len(table) + 1) + 3,
+                         column_config={
+                             "County": st.column_config.TextColumn(alignment="right", help=weighted),
+                             "State": st.column_config.TextColumn(alignment="right", help=weighted),
+                             "US": st.column_config.TextColumn(alignment="right", help=weighted),
+                             "vs State": st.column_config.TextColumn(
+                                 alignment="right", help=diff_help.format(ref="state")),
+                             "vs US": st.column_config.TextColumn(
+                                 alignment="right", help=diff_help.format(ref="US")),
+                         })
+
+    homes = nh.facilities[nh.facilities["fips"] == fips]
+    if len(homes):
+        with st.expander(f"All {len(homes)} nursing homes in the county"):
+            st.dataframe(
+                homes.sort_values("name").assign(
+                    psychotropic=lambda d: d["cit_psychotropic_gdr"] + d["cit_chemical_restraint"])[
+                    ["name", "city", "beds", "residents", "overall_rating", "ls_antipsychotic",
+                     "cit_dementia_care", "psychotropic", "rn_hprd"]
+                ].rename(columns={
+                    "name": "Nursing home", "city": "City", "beds": "Beds", "residents": "Residents/day",
+                    "overall_rating": "Rating", "ls_antipsychotic": "Antipsychotics (long-stay)",
+                    "cit_dementia_care": "F744", "psychotropic": "F758 + F605", "rn_hprd": "RN h/resident-day"}),
+                hide_index=True, width="stretch",
+                column_config={
+                    "Beds": st.column_config.NumberColumn(format="%d"),
+                    "Residents/day": st.column_config.NumberColumn(format="%.0f"),
+                    "Rating": st.column_config.NumberColumn(format="%d ★"),
+                    "Antipsychotics (long-stay)": st.column_config.NumberColumn(format="%.1f%%"),
+                    "RN h/resident-day": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
+    period = nh.facilities["mds_period"].iloc[0] if len(nh.facilities) else ""
+    st.caption(
+        f"CMS Care Compare: MDS quality measures {period} (four-quarter averages); citations from the last "
+        "three standard and complaint inspection cycles. Older adults with a cognitive difficulty: ACS "
+        "2019–2023 5-year estimates (self- or proxy-reported serious difficulty concentrating, remembering "
+        "or making decisions; household and group-quarters population), with wide margins of error in "
+        "small counties. Ecological comparison: it flags where to look, not why."
     )
 
 
@@ -1356,43 +1676,44 @@ def render_county_profile(
     r = current.iloc[0]
     adults = r.get("adult_population")
     st.markdown(f"### {r['county']}, {r['state_name']}")
-    st.caption(f"FIPS {fips} · {int(adults):,} adults · {year} BRFSS estimates, age-adjusted"
-               if pd.notna(adults) else f"FIPS {fips} · {year} BRFSS estimates, age-adjusted")
+    st.caption(f"FIPS {fips}, {int(adults):,} adults, {year} BRFSS estimates (age-adjusted)"
+               if pd.notna(adults) else f"FIPS {fips}, {year} BRFSS estimates (age-adjusted)")
     _profile_metrics(r, year_all[year_all["state"] == r["state"]], year_all)
 
     local, orgs = (model.county_health_centers(access.sites, fips) if access is not None
                    else (pd.DataFrame(), pd.DataFrame()))
-    trend_col, org_col = st.columns(2, gap="large")
+    trend_col, burden_col, org_col = st.columns(3, gap="medium")
     with trend_col:
         st.plotly_chart(
             trend_chart(model.national_trend(county_rows), year,
-                        f"Prevalence trend — {r['county']}, {r['state']}"),
+                        f"Prevalence trend in {r['county']}, {r['state']}"),
             width="stretch",
         )
+    with burden_col:
+        nh = access.nursing_homes if access is not None else None
+        if nh is None:
+            st.info("Nursing home data is not built yet.")
+        else:
+            names = dict(zip(year_all["fips"], year_all["county"]))
+            state_fips = set(year_all.loc[year_all["state"] == r["state"], "fips"])
+            st.plotly_chart(nh_burden_chart(nh.by_fips, names, state_fips, fips, nh.us,
+                                            f"Cognitive burden vs. antipsychotic use in {r['state']}"),
+                            width="stretch")
     with org_col:
         if orgs.empty:
             st.info("No HRSA health center organizations operate sites in this county."
                     if access is not None else "Health center data is not built yet.")
         else:
-            totals, reporting = model.uds_county_summary(orgs, access.uds, list(UDS_SERVICES))
-            st.plotly_chart(
-                uds_county_chart(totals, reporting, len(orgs),
-                                 f"Health center dental & vision services — {r['county']}, {r['state']}"),
-                width="stretch",
-            )
-            st.caption(
-                f"Estimated from the {len(orgs)} organizations with sites in the county: each one's "
-                "UDS count × its share of sites located here. Lines join years where all of them "
-                "published; open markers are years with unpublished counts, so those totals are "
-                "understated and not comparable."
-            )
+            _render_county_uds_summary(access, orgs, f"{r['county']}, {r['state']}")
 
     st.divider()
     if access is None:
         st.info("Care-access data is not built yet. Run `python scripts/preprocess_access.py` to add "
                 "Medicaid benefits, Medicare Advantage plans and health center data.")
         return
-    _render_health_centers(access, fips, year, local, orgs)
+    _render_nursing_homes(access.nursing_homes, fips, r, year_all)
+    st.divider()
+    _render_health_centers(access, fips, year, local, orgs, f"{r['county']}, {r['state']}")
     st.divider()
     left, right = st.columns([2, 3], gap="large")
     with left:
@@ -1400,4 +1721,4 @@ def render_county_profile(
     with right:
         _render_ma_plans(access, fips, r["state"], year_all)
 
-    st.caption("Sources: " + " · ".join(f"[{name}]({url})" for name, url in ACCESS_SOURCES.values()))
+    st.caption("Sources: " + ", ".join(f"[{name}]({url})" for name, url in ACCESS_SOURCES.values()))

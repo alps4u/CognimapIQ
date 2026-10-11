@@ -20,7 +20,9 @@ from src.config import (
     MA_PLAN_COUNTIES_PATH,
     MA_PLANS_PATH,
     MEDICAID_PATH,
+    NH_FACILITIES_PATH,
     PLACES_PATH,
+    SENIOR_COGNITION_PATH,
 )
 
 
@@ -147,11 +149,29 @@ def year_geojson(year: int) -> dict:
 # --------------------------------------------------------------------------- #
 # Care-access snapshot (Medicaid benefits, Medicare Advantage plans, health centers)
 # --------------------------------------------------------------------------- #
-ACCESS_PATHS = (MEDICAID_PATH, MA_PLANS_PATH, MA_PLAN_COUNTIES_PATH, HC_SITES_PATH, HC_UDS_PATH)
+NH_PATHS = (NH_FACILITIES_PATH, SENIOR_COGNITION_PATH)
+ACCESS_PATHS = (MEDICAID_PATH, MA_PLANS_PATH, MA_PLAN_COUNTIES_PATH, HC_SITES_PATH, HC_UDS_PATH, *NH_PATHS)
 
 
 def access_snapshot_ready() -> bool:
-    return all(p.exists() for p in ACCESS_PATHS)
+    return all(p.exists() for p in ACCESS_PATHS if p not in NH_PATHS)
+
+
+def nh_snapshot_ready() -> bool:
+    """Nursing home data arrived later; older snapshots may not have it."""
+    return all(p.exists() for p in NH_PATHS)
+
+
+@st.cache_data(show_spinner=False)
+def load_nh_facilities() -> pd.DataFrame:
+    _require(NH_FACILITIES_PATH)
+    return pd.read_parquet(NH_FACILITIES_PATH)
+
+
+@st.cache_data(show_spinner=False)
+def load_senior_cognition() -> pd.DataFrame:
+    _require(SENIOR_COGNITION_PATH)
+    return pd.read_parquet(SENIOR_COGNITION_PATH)
 
 
 @st.cache_data(show_spinner=False)

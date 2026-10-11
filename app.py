@@ -49,14 +49,23 @@ def plan_shares() -> pd.DataFrame:
     return model.plan_benefit_shares(dl.load_ma_plans(), dl.load_ma_plan_counties())
 
 
+@st.cache_data(show_spinner=False)
+def nursing_home_summaries() -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    return model.nh_summaries(dl.load_nh_facilities(), dl.load_senior_cognition())
+
+
 def county_access() -> ui.CountyAccess | None:
     """Care-access tables for the county profile, or None before preprocess_access.py has run."""
     if not dl.access_snapshot_ready():
         return None
+    nursing_homes = None
+    if dl.nh_snapshot_ready():
+        by_fips, by_state, us = nursing_home_summaries()
+        nursing_homes = ui.NursingHomes(dl.load_nh_facilities(), by_fips, by_state, us)
     return ui.CountyAccess(
         medicaid=dl.load_medicaid_benefits(), plans=dl.load_ma_plans(),
         plan_counties=dl.load_ma_plan_counties(), plan_shares=plan_shares(),
-        sites=dl.load_hc_sites(), uds=dl.load_hc_uds(),
+        sites=dl.load_hc_sites(), uds=dl.load_hc_uds(), nursing_homes=nursing_homes,
     )
 
 
@@ -100,7 +109,7 @@ head_l, head_r = st.columns([3, 2], vertical_alignment="bottom")
 with head_l:
     ui.render_title("Cognimap IQ")
     st.caption(
-        "Spatial evidence linking sensory impairment — vision, hearing and mastication — "
+        "Spatial evidence linking sensory impairment (vision, hearing and mastication) "
         "to cognitive decline, to guide budgets toward low-cost preventative care during "
         "the intervention window of opportunity."
     )
@@ -163,7 +172,7 @@ if top_fips and (st.session_state.get("_profile_priority") != priority_key
 stats = model.summarize(year_df)
 prev_stats = model.summarize(prev_df) if prev_df is not None and len(prev_df) else None
 
-ui.render_kpis(stats, prev_stats, f"{region_label} — {year}")
+ui.render_kpis(stats, prev_stats, f"{region_label}, {year}", prev_years[-1] if prev_years else None)
 if year_df.empty:
     st.warning("No counties match the current filters.")
     st.stop()
@@ -190,13 +199,13 @@ with tab_map:
     map_click = {"key": map_key,
                  "on_click": partial(ui.open_profile_on_click, map_key, "main_tab", PROFILE_TAB)}
     if controls.map_mode == "overlay":
-        st.markdown(f"#### Cognitive & sensory overlay · {year}")
+        st.markdown(f"#### Cognitive & sensory overlay ({year})")
         if not controls.overlays:
             st.info("Select at least one layer in the sidebar.")
         ui.render_overlay_map(geojson, year_all, panel, selected_fips, view,
                               controls.overlays, controls.pattern_top_pct, pin, highlight, **map_click)
     else:
-        st.markdown(f"#### {COMPOSITE_LABEL} · {year}")
+        st.markdown(f"#### {COMPOSITE_LABEL} ({year})")
         ui.render_sori_map(geojson, year_all, panel, selected_fips, view, pin, highlight, **map_click)
 
     teeth_year = year_all["teethlost_source_year"].dropna()
@@ -206,7 +215,7 @@ with tab_map:
             f"{int(teeth_year.iloc[0])} estimates."
         )
 
-    w_txt = " · ".join(f"{MEASURE_LABELS[m]} {weights[m]:.0%}" for m in SENSORY_MEASURES)
+    w_txt = ", ".join(f"{MEASURE_LABELS[m]} {weights[m]:.0%}" for m in SENSORY_MEASURES)
     st.caption(f"{COMPOSITE_SHORT} weights ({controls.weight_mode.lower()}): {w_txt}")
     st.caption("Click a county to open it in the County profile tab.")
 
@@ -214,7 +223,7 @@ with tab_map:
 # County profile — sensory burden and access to preventative care
 # --------------------------------------------------------------------------- #
 with tab_profile:
-    profile_fips = ui.render_county_picker(year_all, top_fips, pin)
+    profile_fips = ui.render_county_picker(year_all, pin)
     ui.render_county_profile(profile_fips, panel, year, county_access())
 
 # --------------------------------------------------------------------------- #
@@ -225,7 +234,7 @@ with tab_time:
     with left:
         trend = model.national_trend(region)
         st.plotly_chart(
-            ui.trend_chart(trend, year, f"Prevalence trend — {region_label}"),
+            ui.trend_chart(trend, year, f"Prevalence trend in {region_label}"),
             width="stretch",
         )
     with right:
@@ -241,16 +250,20 @@ with tab_time:
     if len(years) > 1:
         st.markdown(f"##### Largest increases in {COMPOSITE_LABEL}, {years[0]} → {years[-1]}")
         change = model.county_change(region, COMPOSITE, years[0], years[-1])
+        change_col = f"Change ({years[-1]} vs {years[0]})"
         st.dataframe(
             change.sort_values("change", ascending=False).head(15)
             .rename(columns={"county": "County", "state": "State", "start": str(years[0]),
-                             "end": str(years[-1]), "change": "Change"})
+                             "end": str(years[-1]), "change": change_col})
             .drop(columns="fips"),
             hide_index=True, width="stretch",
             column_config={
                 str(years[0]): st.column_config.NumberColumn(format="%.0f"),
                 str(years[-1]): st.column_config.NumberColumn(format="%.0f"),
-                "Change": st.column_config.NumberColumn(format="%+.0f"),
+                change_col: st.column_config.NumberColumn(
+                    format="%+.0f",
+                    help=f"{COMPOSITE_SHORT} {years[-1]} − {COMPOSITE_SHORT} {years[0]}. Example: 40 → 55 = +15, "
+                         "i.e. the county moved 15 places up the 0–100 burden ranking."),
             },
         )
 
@@ -262,9 +275,9 @@ with tab_model:
         st.info("Not enough data to fit the association model for this year.")
     else:
         st.markdown(
-            f"**Association model ({year}, national, {VALUE_TYPE_LABEL.lower()})** — "
-            f"Cognitive decline ~ Vision + Hearing + Complete tooth loss · "
-            f"n = {fit.n:,} counties · R² = {fit.r2:.2f}"
+            f"**Association model ({year}, national, {VALUE_TYPE_LABEL.lower()}):** "
+            f"Cognitive decline ~ Vision + Hearing + Complete tooth loss; "
+            f"n = {fit.n:,} counties, R² = {fit.r2:.2f}"
         )
         c1, c2 = st.columns([3, 2])
         with c1:
@@ -297,7 +310,7 @@ with tab_model:
 # --------------------------------------------------------------------------- #
 with tab_table:
     t1, t2 = st.columns([3, 1], vertical_alignment="bottom")
-    t1.markdown(f"#### Intervention priority — {region_label}, {year}")
+    t1.markdown(f"#### Intervention priority in {region_label} ({year})")
     top_n = t2.selectbox("Show Top", [25, 50, 100, 250, 500], index=1)
     ui.render_priority_table(year_df, top_n)
     export = year_df.drop(columns=[c for c in year_df.columns if c.startswith("z_")])
