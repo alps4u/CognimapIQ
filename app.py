@@ -158,16 +158,11 @@ pin = ui.lookup_pin(year_all)
 
 PROFILE_TAB = "🏥 County profile"
 
-# County profile defaults to the first county of the Intervention priority table and
-# is re-seeded whenever that ranking changes (region, year or SORI weights); a manual
-# pick is kept until then.
-ranking = model.priority_ranking(year_df)
-top_fips = ranking["fips"].iloc[0] if len(ranking) else None
-priority_key = (tuple(controls.states), year, tuple(sorted(weights.items())))
-if top_fips and (st.session_state.get("_profile_priority") != priority_key
-                 or st.session_state.get("profile_fips") not in set(year_all["fips"])):
-    st.session_state.update(_profile_priority=priority_key, profile_fips=top_fips,
-                            profile_state=ranking["state"].iloc[0])
+# County profile defaults to the alphabetically first state and county (Alabama,
+# Autauga); a manual pick or map click is kept while that county has data this year.
+if st.session_state.get("profile_fips") not in set(year_all["fips"]):
+    first = year_all.sort_values(["state_name", "county"]).iloc[0]
+    st.session_state.update(profile_fips=first["fips"], profile_state=first["state"])
 
 stats = model.summarize(year_df)
 prev_stats = model.summarize(prev_df) if prev_df is not None and len(prev_df) else None

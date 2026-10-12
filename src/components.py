@@ -50,7 +50,6 @@ from src.config import (
     PATTERN_TOP_DEFAULT,
     PATTERN_TOP_SHARES,
     POLICY_EVENTS,
-    SAMPLE_ADDRESS,
     SENSORY_MEASURES,
     SEQUENTIAL_RAMP,
     UDS_SERVICES,
@@ -128,8 +127,7 @@ def render_sidebar(states: pd.DataFrame) -> Controls:
     sb.subheader("Address lookup")
     with sb.form("address_lookup", border=False):
         st.text_input(
-            "US street address", value=SAMPLE_ADDRESS, key="lookup_address",
-            placeholder=f"e.g. {SAMPLE_ADDRESS}",
+            "US street address", key="lookup_address", placeholder="Street, City, State ZIP",
             help="Resolved to its county with the US Census Geocoder.",
         )
         st.form_submit_button("Find county", on_click=_run_lookup, width="stretch")
@@ -1142,7 +1140,7 @@ def _county_name(year_all: pd.DataFrame, fips: str) -> str:
 
 def render_county_picker(year_all: pd.DataFrame, pin: dict | None) -> str:
     """State + county selectors for the profile tab (session keys `profile_state` /
-    `profile_fips`, seeded by the caller with the top Intervention priority county),
+    `profile_fips`, seeded by the caller with the alphabetically first county),
     plus a shortcut to the address-lookup county."""
     states = year_all[["state", "state_name"]].drop_duplicates().sort_values("state_name")
     names = dict(zip(states["state"], states["state_name"]))
@@ -1158,7 +1156,7 @@ def render_county_picker(year_all: pd.DataFrame, pin: dict | None) -> str:
     labels = dict(zip(counties["fips"], names_shown))
     fips = c2.selectbox(
         "County", list(labels), format_func=lambda f: f"{labels[f]} ({f})", key="profile_fips",
-        help="Defaults to the first county in the Intervention priority table.",
+        help="Defaults to the alphabetically first county (Autauga, Alabama).",
     )
 
     if pin and pin["state"] and pin["fips"] != fips:
@@ -1175,7 +1173,9 @@ def _section(title: str, caption: str | None = None) -> None:
 
 
 def _profile_metrics(r: pd.Series, state_rows: pd.DataFrame, year_all: pd.DataFrame) -> None:
-    c = st.columns(5)
+    # Same 6-column grid as the KPI row, first slot (Counties) left empty, so each card
+    # sits under its national counterpart.
+    c = st.columns(6)[1:]
     score = r.get(COMPOSITE)
     c[0].metric(
         COMPOSITE_SHORT, "–" if pd.isna(score) else f"{score:.0f}", r.get("risk_tier") or None,
@@ -1682,7 +1682,7 @@ def render_county_profile(
 
     local, orgs = (model.county_health_centers(access.sites, fips) if access is not None
                    else (pd.DataFrame(), pd.DataFrame()))
-    trend_col, burden_col, org_col = st.columns(3, gap="medium")
+    trend_col, org_col, burden_col = st.columns(3, gap="medium")
     with trend_col:
         st.plotly_chart(
             trend_chart(model.national_trend(county_rows), year,
@@ -1711,8 +1711,6 @@ def render_county_profile(
         st.info("Care-access data is not built yet. Run `python scripts/preprocess_access.py` to add "
                 "Medicaid benefits, Medicare Advantage plans and health center data.")
         return
-    _render_nursing_homes(access.nursing_homes, fips, r, year_all)
-    st.divider()
     _render_health_centers(access, fips, year, local, orgs, f"{r['county']}, {r['state']}")
     st.divider()
     left, right = st.columns([2, 3], gap="large")
@@ -1720,5 +1718,7 @@ def render_county_profile(
         _render_medicaid(access.medicaid, r["state"], r["state_name"])
     with right:
         _render_ma_plans(access, fips, r["state"], year_all)
+    st.divider()
+    _render_nursing_homes(access.nursing_homes, fips, r, year_all)
 
     st.caption("Sources: " + ", ".join(f"[{name}]({url})" for name, url in ACCESS_SOURCES.values()))

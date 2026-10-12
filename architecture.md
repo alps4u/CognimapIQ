@@ -149,8 +149,8 @@ A rerun therefore mostly slices cached frames and rebuilds figures.
 
 ### 4.4 Profile selection rules
 
-1. The profile defaults to the first county of the Intervention priority table (`model.priority_ranking`, the same function the table uses).
-2. When the region, year or SORI weights change, the default is re-seeded; otherwise a manual pick is kept.
+1. The profile defaults to the alphabetically first state and county (Alabama, Autauga County).
+2. A manual pick is kept across region, year and weight changes; it falls back to the default only if that county has no estimate for the selected year.
 3. A map click selects that county and switches to the profile tab.
 4. A successful address lookup offers a "Looked-up" shortcut button instead of switching automatically.
 
