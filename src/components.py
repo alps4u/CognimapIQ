@@ -112,6 +112,12 @@ def _run_lookup() -> None:
     st.session_state["lookup"] = {"match": match, "error": error}
 
 
+def _reset_overlays() -> None:
+    """Switching to the overlay view starts with only Cognitive decline selected."""
+    if st.session_state.get("map_mode") == "overlay":
+        st.session_state.update({f"ov_{m}": m == OUTCOME_MEASURE for m in [OUTCOME_MEASURE, *SENSORY_MEASURES]})
+
+
 def render_sidebar(states: pd.DataFrame) -> Controls:
     sb = st.sidebar
     sb.header("Filters & controls")
@@ -140,11 +146,14 @@ def render_sidebar(states: pd.DataFrame) -> Controls:
         options=list(MAP_MODES),
         format_func=MAP_MODES.get,
         label_visibility="collapsed",
+        key="map_mode",
+        on_change=_reset_overlays,
     )
     overlays: list[str] = []
     if map_mode == "overlay":
         for m in [OUTCOME_MEASURE, *SENSORY_MEASURES]:
-            if sb.checkbox(f"{MEASURE_LABELS[m]} ({OVERLAY_HINTS[m]})", value=m == OUTCOME_MEASURE, key=f"ov_{m}"):
+            st.session_state.setdefault(f"ov_{m}", m == OUTCOME_MEASURE)
+            if sb.checkbox(f"{MEASURE_LABELS[m]} ({OVERLAY_HINTS[m]})", key=f"ov_{m}"):
                 overlays.append(m)
     pattern_top_pct = sb.select_slider(
         "Pattern threshold (top %)",
