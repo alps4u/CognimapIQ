@@ -115,7 +115,9 @@ with head_l:
     )
 with head_r:
     slider_col, play_col = st.columns([4, 1], vertical_alignment="bottom")
-    year = slider_col.select_slider("Analysis year (BRFSS survey year)", options=years, key="year")
+    # Moving the slider by hand stops playback, so the next tick doesn't jump past the pick.
+    year = slider_col.select_slider("Analysis year (BRFSS survey year)", options=years, key="year",
+                                    on_change=lambda: st.session_state.update(playing=False))
     play_col.button(
         "⏸" if st.session_state.get("playing") else "▶",
         help="Play the timeline year by year",

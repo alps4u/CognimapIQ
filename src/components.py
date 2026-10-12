@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 from dataclasses import dataclass
 
 import numpy as np
@@ -143,7 +144,7 @@ def render_sidebar(states: pd.DataFrame) -> Controls:
     overlays: list[str] = []
     if map_mode == "overlay":
         for m in [OUTCOME_MEASURE, *SENSORY_MEASURES]:
-            if sb.checkbox(f"{MEASURE_LABELS[m]} ({OVERLAY_HINTS[m]})", value=True, key=f"ov_{m}"):
+            if sb.checkbox(f"{MEASURE_LABELS[m]} ({OVERLAY_HINTS[m]})", value=m == OUTCOME_MEASURE, key=f"ov_{m}"):
                 overlays.append(m)
     pattern_top_pct = sb.select_slider(
         "Pattern threshold (top %)",
@@ -364,13 +365,13 @@ def build_map_features(
 ) -> list[dict]:
     """County polygons with fill colour and tooltip text. `fill_metric=None`
     draws a neutral base so pattern overlays read on their own."""
-    rows = year_df.set_index("fips")
+    rows = year_df.set_index("fips").to_dict("index")  # dict lookups; .loc per county is slow
     features = []
     for feat in geojson["features"]:
         fips = feat["properties"]["fips"]
         props = {"fips": fips, "name": feat["properties"]["name"]}
-        if fips in rows.index:
-            r = rows.loc[fips]
+        r = rows.get(fips)
+        if r is not None:
             in_sel = fips in selected_fips
             color = _classify(r.get(fill_metric), breaks, ramp) if fill_metric else NEUTRAL_FILL
             props.update(
@@ -631,11 +632,19 @@ def open_profile_on_click(map_key: str, tab_key: str, tab_label: str) -> None:
     )
 
 
+class CompactDeck(pdk.Deck):
+    """pydeck pretty-prints its JSON (indent=2), which is ~70% whitespace for the county
+    map. Every year-slider step resends the whole spec, so send it compact."""
+
+    def to_json(self) -> str:
+        return json.dumps(json.loads(super().to_json()), separators=(",", ":"))
+
+
 def render_map(
     layers: list[pdk.Layer], view: pdk.ViewState, pin: dict | None = None,
     highlight: list[pdk.Layer] = (), key: str = "risk_map", on_click=None,
 ) -> None:
-    deck = pdk.Deck(
+    deck = CompactDeck(
         layers=[*layers, *highlight, *_pin_layers(pin)],
         initial_view_state=view,
         # Clicks open the county profile, so double-click zoom is off (wheel and +/- still zoom).
@@ -1295,7 +1304,7 @@ def _sites_map(local: pd.DataFrame, fips: str, year: int) -> None:
             line_width_units='"pixels"', pickable=True,
         ),
     ]
-    deck = pdk.Deck(
+    deck = CompactDeck(
         layers=layers, initial_view_state=view_state({fips}, True, padding=0.12),
         map_provider="carto", map_style="light",
         tooltip={
