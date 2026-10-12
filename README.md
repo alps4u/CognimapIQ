@@ -2,7 +2,7 @@
 
 An interactive web GIS dashboard showing how cognitive decline relates to three sensory impairments (vision, hearing and mastication) across US counties, and what preventative and dementia care is available locally. It is built for public health policy makers, health authority analysts and budget planners who want evidence for moving budgets from reactive care (long-term care, emergency admissions) toward low-cost preventative sensory care during the intervention window of opportunity.
 
-This prototype (PoC) uses **CDC PLACES** county estimates as a stand-in for Canadian longitudinal data (CCHS, CLSA). Background and goals are in [`project_architecture.md`](project_architecture.md), the technical design is in [`architecture.md`](architecture.md), and coding guidelines are in [`claude.md`](claude.md).
+This prototype (PoC) uses **CDC PLACES** county estimates as a stand-in for Canadian longitudinal data (CCHS, CLSA). Background and goals are in [`project_architecture.md`](project_architecture.md), and the technical design is in [`architecture.md`](architecture.md).
 
 ## Quick start
 

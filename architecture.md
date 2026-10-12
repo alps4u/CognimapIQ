@@ -1,12 +1,12 @@
 # Cognimap IQ: Technical Architecture
 
-This document describes how the dashboard is built: data sources, the offline pipeline, the runtime design, the analytics and the main design decisions. The problem statement, objectives and target users are in [`project_architecture.md`](project_architecture.md); coding rules are in [`claude.md`](claude.md); usage is in [`README.md`](README.md).
+This document describes how the dashboard is built: data sources, the offline pipeline, the runtime design, the analytics and the main design decisions. The problem statement, objectives and target users are in [`project_architecture.md`](project_architecture.md); usage is in [`README.md`](README.md).
 
 ## 1. Scope and constraints
 
 - **Purpose:** a GIS decision-support prototype linking sensory impairment (vision, hearing, mastication) to cognitive decline at county level, plus local care access (Medicaid, Medicare Advantage, health centers, nursing homes), to support shifting budgets toward preventative sensory care.
 - **Prototype data:** US public data (CDC PLACES and companions) stand in for Canadian longitudinal data (CCHS, CLSA) and US counties stand in for Canadian health regions.
-- **Constraints (from `claude.md`):**
+- **Constraints:**
   - single-process, serverless Streamlit app; no database or backend service
   - every runtime read is a local Parquet / GeoParquet file loaded through `@st.cache_data`; raw CSV/XLSX is only read by the preprocessing scripts
   - all geometry in `EPSG:4326` (pattern geometry is built in `EPSG:3857` and converted back)
