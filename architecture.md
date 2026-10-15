@@ -169,16 +169,18 @@ A rerun therefore mostly slices cached frames and rebuilds figures.
 
 - **Choropleth.** Quantile class breaks are computed on the pooled distribution of all years, so the same colour means the same value at every step of the slider. Counties outside the selected states are dimmed; selected states and the looked-up county get black outlines (states are dissolved with a grow-union-shrink buffer to remove seams).
 - **Overlay patterns** are real geometry: 45° hatch lines clipped to each county and a staggered dot grid, built in Web Mercator so they stay aligned across neighbouring counties. Spacing is in screen pixels for the initial zoom (dots widen to 7 px on the national view), counties too small for the grid get one dot, and patterns are only built near the initial viewport.
-- **View fitting.** The initial view is computed from the selection's bounds in Web Mercator for the map's pixel size.
+- **View fitting.** The initial view is computed from the selection's bounds in Web Mercator for the map's pixel size. With no selection it fits the contiguous US (Alaska and Hawaii are a pan away); the browser refits that default to the map's real width.
+- **Geography.** A County / State radio above the map's top-right corner switches the choropleth; the state map is the default. State rows aggregate counties like the KPI cards (adult-weighted prevalence, average county SORI), shapes are the counties dissolved per state, DC gets a dot marker, and overlay patterns are drawn over the counties of flagged states. States have no click-through to the profile.
 - **pydeck strings.** pydeck turns string arguments into accessors, so literal values are double-quoted (`'"pixels"'`).
 - **Line-end labels.** Labels sit in one column at the last year, are spread vertically to at least 15 px apart, take their line's colour, and live in a reserved right margin so narrow charts do not clip them.
 
 ## 7. Browser-side helper
 
-`install_tooltip_placement()` injects one script with `st.html(..., unsafe_allow_javascript=True)`:
+`install_map_scripts()` injects one script with `st.html(..., unsafe_allow_javascript=True)`. It must stay a single `<script>` whose text contains nothing that looks like a tag (`<` followed by a letter, `/` or `!`): Streamlit sanitizes `st.html` with DOMPurify, which drops such scripts silently. The function asserts this.
 
 - **Tooltip placement.** deck.gl positions its tooltip at a fixed offset (and the y offset is wrong inside Streamlit), while the map container clips overflow. The script tracks the real pointer and re-places `.deck-tooltip` above the cursor, below it near the top edge, and always inside the map.
 - **Double-click guard.** Map selection toggles, so a double-click would select and immediately deselect a county before Streamlit sees it. The script swallows a second press at the same spot within 500 ms.
+- **Zoom percentage.** A box under the map's +/- buttons shows and sets the zoom as a percentage of the default contiguous-US view (type a value or pick a preset); the +/- buttons step it by 20 percentage points instead of doubling. Streamlit does not expose the map's view, so the script reaches the deck.gl instance through React's fiber tree and sets the view through deck's `onViewStateChange`; if it cannot find the instance the box is not shown.
 - **Map click.** The Pydeck chart uses `on_select` with a single-object selection; the callback stores the clicked FIPS and state, switches `main_tab` to the profile and bumps `_map_nonce` so the map comes back without a lingering selection. Double-click zoom is disabled on the map view.
 
 ## 8. Known limitations
@@ -186,7 +188,7 @@ A rerun therefore mostly slices cached frames and rebuilds figures.
 - **Ecological design.** County-level, cross-sectional comparisons; they indicate where to look, not individual-level or causal effects.
 - **Data vintage and coverage.** KFF Medicaid benefits are from 2018. Many UDS Table 5 values are withheld, especially before 2022, and UDS has no hearing services line. CMS PBP lists Connecticut by legacy counties, which cannot be mapped to planning regions. ACS cognitive difficulty is self- or proxy-reported, not diagnosed dementia, with wide margins of error in small counties. US territories are not covered.
 - **UDS site allocation** uses today's site list for every year.
-- **Streamlit coupling.** The JavaScript helper depends on Streamlit's DOM (`.deck-tooltip`, `stDeckGlJsonChart`); recheck tooltip placement and double-click behaviour after upgrading Streamlit.
+- **Streamlit coupling.** The JavaScript helper depends on Streamlit's DOM (`.deck-tooltip`, `stDeckGlJsonChart`, `stDeckGlJsonChartZoomButton`) and on deck.gl's React internals for the zoom box; recheck tooltip placement, double-click behaviour and the zoom box after upgrading Streamlit.
 - **Label spacing** assumes an approximate plot height; very narrow windows can bring labels closer.
 
 ## 9. Path to Canadian data

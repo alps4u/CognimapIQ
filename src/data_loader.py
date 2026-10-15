@@ -127,17 +127,42 @@ def selection_outline(fips: tuple[str, ...], year: int, by_state: bool) -> dict:
     gdf = year_geometry(year)
     sel = gdf[gdf["fips"].isin(fips)]
     if by_state:
-        # County edges don't meet exactly, so a plain dissolve leaves seam lines inside
-        # each state. Grow-union-shrink closes the gaps; dropping holes removes slivers.
-        eps = 0.005  # degrees (~500 m)
-        outlines = []
-        for _, g in gdf[gdf["statefp"].isin(sel["statefp"].unique())].groupby("statefp"):
-            merged = shapely.union_all(shapely.buffer(g.geometry.values, eps)).buffer(-eps)
-            outlines.append(shapely.MultiPolygon(
-                [shapely.Polygon(p.exterior) for p in _polygon_parts(merged) if not p.is_empty]
-            ).simplify(0.002))
-        sel = gpd.GeoDataFrame(geometry=outlines, crs=gdf.crs)
+        states = state_geometry(year)
+        sel = states[states["statefp"].isin(sel["statefp"].unique())]
     return json.loads(sel[["geometry"]].to_json(drop_id=True))
+
+
+@st.cache_data(show_spinner="Assembling state geometry…")
+def state_geometry(year: int) -> gpd.GeoDataFrame:
+    """The year's counties dissolved into one shape per state (`statefp`)."""
+    gdf = year_geometry(year)
+    # County edges don't meet exactly, so a plain dissolve leaves seam lines inside
+    # each state. Grow-union-shrink closes the gaps; dropping holes removes slivers.
+    eps = 0.005  # degrees (~500 m)
+    statefps, shapes = [], []
+    for statefp, g in gdf.groupby("statefp"):
+        merged = shapely.union_all(shapely.buffer(g.geometry.values, eps)).buffer(-eps)
+        statefps.append(statefp)
+        shapes.append(shapely.MultiPolygon(
+            [shapely.Polygon(p.exterior) for p in _polygon_parts(merged) if not p.is_empty]
+        ).simplify(0.002))
+    return gpd.GeoDataFrame({"statefp": statefps}, geometry=shapes, crs=gdf.crs)
+
+
+@st.cache_data(show_spinner=False)
+def small_state_points(year: int, max_km2: float = 1_000) -> dict[str, tuple[float, float]]:
+    """(lon, lat) inside states too small to see on a national map (DC), keyed by state FIPS."""
+    states = state_geometry(year)
+    small = states[states.to_crs("EPSG:5070").area < max_km2 * 1e6]
+    return {f: (pt.x, pt.y) for f, pt in zip(small["statefp"], small.geometry.representative_point())}
+
+
+@st.cache_data(show_spinner=False)
+def state_geojson(year: int) -> dict:
+    """State shapes as GeoJSON keyed like the county map (`fips` = state FIPS)."""
+    states = state_geometry(year).rename(columns={"statefp": "fips"})
+    states["name"] = states["fips"]
+    return json.loads(states[["fips", "name", "geometry"]].to_json(drop_id=True))
 
 
 @st.cache_data(show_spinner=False)

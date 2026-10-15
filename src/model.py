@@ -209,6 +209,27 @@ def summarize(df: pd.DataFrame) -> dict:
     return stats
 
 
+def state_summary(panel: pd.DataFrame) -> pd.DataFrame:
+    """One row per state and year, aggregated from counties as in `summarize`:
+    adult-population-weighted prevalence and the simple average of county SORI.
+    `fips` holds the two-digit state FIPS so state rows can key a map like counties."""
+    df = panel.assign(statefp=panel["fips"].str[:2])
+    keys = ["year", "statefp", "state", "state_name"]
+    w = df["adult_population"].where(df["adult_population"] > 0)
+    g = df.groupby(keys)
+    out = g.agg(counties=("fips", "nunique"), adult_population=("adult_population", "sum"),
+                **{COMPOSITE: (COMPOSITE, "mean")})
+    for m in [*SENSORY_MEASURES, OUTCOME_MEASURE]:
+        has = df[m].notna() & w.notna()
+        num = (df[m] * w).where(has).groupby([df[k] for k in keys]).sum(min_count=1)
+        den = w.where(has).groupby([df[k] for k in keys]).sum(min_count=1)
+        out[m] = num / den
+    out = out.reset_index().rename(columns={"statefp": "fips"})
+    out["county"] = out["state_name"]  # display name, like a county row
+    out["risk_tier"] = out[COMPOSITE].apply(risk_tier)
+    return out
+
+
 def priority_ranking(df: pd.DataFrame) -> pd.DataFrame:
     """Counties ordered for intervention: highest Sensory Organ Risk Index first."""
     return df.dropna(subset=[COMPOSITE]).sort_values(COMPOSITE, ascending=False)

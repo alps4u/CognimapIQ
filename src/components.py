@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -59,6 +60,7 @@ from src.model import ModelFit, ScenarioResult, weighted_mean
 
 RESIDUAL = "residual"
 MAP_MODES = {"sori": COMPOSITE_LABEL, "overlay": "Cognitive & sensory overlay"}
+GEOGRAPHIES = {"county": "County", "state": "State"}
 OVERLAY_HINTS = {
     "COGNITION": "blue fill",
     "VISION": "orange ╱ hatch",
@@ -301,6 +303,13 @@ WEIGHTED_RATE_HELP = (
 
 def render_kpis(stats: dict, prev: dict | None, region_label: str, prev_year: int | None = None) -> None:
     st.markdown(f"**{region_label}**")
+    # The first year has no prior year to compare with. A neutral pill keeps the cards
+    # the same height, so the map below doesn't jump when the year slider reaches it.
+    def delta_kw(cur: float, prev_val: float | None, suffix: str = " pp") -> dict:
+        if prev is None:
+            return {"delta": "Baseline year", "delta_color": "off", "delta_arrow": "off"}
+        return {"delta": _delta(cur, prev_val, str(prev_year), suffix), "delta_color": "inverse"}
+
     c = st.columns(6)
     c[0].metric(
         "Counties", f"{stats['counties']:,}",
@@ -308,8 +317,7 @@ def render_kpis(stats: dict, prev: dict | None, region_label: str, prev_year: in
     )
     c[1].metric(
         f"Avg. {COMPOSITE_SHORT}", "–" if pd.isna(stats["score_mean"]) else f"{stats['score_mean']:.0f}",
-        _delta(stats["score_mean"], prev and prev["score_mean"], str(prev_year), ""),
-        delta_color="inverse",
+        **delta_kw(stats["score_mean"], prev and prev["score_mean"], ""),
         help=f"{COMPOSITE_LABEL}: each sensory rate (vision, hearing, tooth loss) becomes a z-score, the z-scores are "
             "averaged with the chosen weights, and the average is ranked 0–100 against every county-year. "
              "The card shows the simple average of county scores. Example: a county scoring 82 has a "
@@ -318,8 +326,7 @@ def render_kpis(stats: dict, prev: dict | None, region_label: str, prev_year: in
     for col, m in zip(c[2:], [OUTCOME_MEASURE, *SENSORY_MEASURES]):
         col.metric(
             MEASURE_LABELS[m], _fmt_pct(stats[m]),
-            _delta(stats[m], prev and prev[m], str(prev_year)),
-            delta_color="inverse",
+            **delta_kw(stats[m], prev and prev[m]),
             help=MEASURE_DESCRIPTIONS[m] + WEIGHTED_RATE_HELP,
         )
 
@@ -403,9 +410,12 @@ def build_map_features(
 
 
 DECK_WORLD_PX = 512  # deck.gl world size at zoom 0
-MAP_HEIGHT_PX = 560
-MAP_WIDTH_PX = 1100  # approximate main-column width on a wide layout
-US_VIEW = pdk.ViewState(latitude=38.5, longitude=-96.5, zoom=3.3)
+MAP_HEIGHT_PX = 740  # tall enough that the contiguous US fills a wide map at full size
+MAP_WIDTH_PX = 1040  # approximate main-column width on a wide layout
+# Contiguous US (lon/lat): the default view fills the map with it; Alaska and
+# Hawaii stay a pan away (fitting them would shrink the lower 48 by half).
+CONTIGUOUS_US_BOUNDS = (-124.8, 24.5, -66.9, 49.4)
+US_VIEW_PADDING = 0.03
 
 
 def _mercator_y(lat: float) -> float:
@@ -414,13 +424,8 @@ def _mercator_y(lat: float) -> float:
     return 256 * (1 - np.log(np.tan(np.pi / 4 + phi / 2)) / np.pi)
 
 
-def view_state(selected_fips: set[str], filtered: bool, padding: float = 0.08) -> pdk.ViewState:
-    """Fit the map to the selected states' boundaries; whole US otherwise."""
-    if not (filtered and selected_fips):
-        return US_VIEW
-    bounds = dl.selection_bounds(tuple(sorted(selected_fips)))
-    if bounds is None:
-        return US_VIEW
+def _fit_bounds(bounds: tuple[float, float, float, float], padding: float) -> pdk.ViewState:
+    """View that fits (min_lon, min_lat, max_lon, max_lat) into the map with `padding` per side."""
     min_lon, min_lat, max_lon, max_lat = bounds
     dx = (max_lon - min_lon) / 360 * DECK_WORLD_PX
     y_top, y_bottom = _mercator_y(max_lat), _mercator_y(min_lat)
@@ -434,6 +439,20 @@ def view_state(selected_fips: set[str], filtered: bool, padding: float = 0.08) -
     if center_lon > 180:
         center_lon -= 360
     return pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=float(np.clip(zoom, 2.5, 11)))
+
+
+# The browser refits this to the map's real width (see MAP_ZOOM_JS).
+US_VIEW = _fit_bounds(CONTIGUOUS_US_BOUNDS, US_VIEW_PADDING)
+
+
+def view_state(selected_fips: set[str], filtered: bool, padding: float = 0.08) -> pdk.ViewState:
+    """Fit the map to the selected states' boundaries; the contiguous US otherwise."""
+    if not (filtered and selected_fips):
+        return US_VIEW
+    bounds = dl.selection_bounds(tuple(sorted(selected_fips)))
+    if bounds is None:
+        return US_VIEW
+    return _fit_bounds(bounds, padding)
 
 
 TOOLTIP_HTML = (
@@ -463,6 +482,22 @@ def _county_layer(features: list[dict]) -> pdk.Layer:
         highlight_color=[11, 11, 11, 70],
         transitions={"getFillColor": 700},
     )
+
+
+def _marker_layer(features: list[dict], points: dict[str, tuple[float, float]]) -> list[pdk.Layer]:
+    """Dots for areas too small to see at national zoom (DC), coloured and
+    hoverable like their polygons."""
+    data = [{**f["properties"], "lon": points[f["properties"]["fips"]][0],
+             "lat": points[f["properties"]["fips"]][1]}
+            for f in features if f["properties"]["fips"] in points]
+    if not data:
+        return []
+    return [pdk.Layer(
+        "ScatterplotLayer", data=data, id="small_areas", get_position=["lon", "lat"],
+        get_fill_color="fill", get_line_color=[255, 255, 255, 255], get_radius=5,
+        radius_units='"pixels"', stroked=True, get_line_width=1.5, line_width_units='"pixels"',
+        pickable=True, auto_highlight=True, highlight_color=[11, 11, 11, 70],
+    )]
 
 
 def dot_spacing_px(zoom: float) -> float:
@@ -566,7 +601,6 @@ def highlight_layers(
 # map, like Leaflet's auto-direction tooltips. It also keeps a double-click on a
 # county from deselecting it (see the end of the script).
 TOOLTIP_PLACEMENT_JS = r"""
-<script>
 (() => {
   if (window.__cognimapTooltip) return;
   window.__cognimapTooltip = true;
@@ -615,12 +649,168 @@ TOOLTIP_PLACEMENT_JS = r"""
     }, true);
   }
 })();
-</script>
 """
 
 
-def install_tooltip_placement() -> None:
-    st.html(TOOLTIP_PLACEMENT_JS, unsafe_allow_javascript=True)
+# While a rerun is in progress Streamlit fades every not-yet-updated element to a
+# low opacity. The year slider reruns the whole page, so the map washed out to white
+# until its new spec arrived. Keep maps fully opaque: the old year stays on screen
+# and deck.gl's fill-colour transition morphs it into the new year.
+MAP_NO_STALE_FADE_CSS = """
+<style>
+[data-testid="stElementContainer"][data-stale="true"]:has([data-testid="stDeckGlJsonChart"]) {
+  opacity: 1 !important;
+  transition: none !important;
+}
+.st-key-map_geo [role="radiogroup"] { justify-content: flex-end; }
+</style>
+"""
+
+
+def install_map_styles() -> None:
+    st.html(MAP_NO_STALE_FADE_CSS)
+
+
+# Zoom percentage box under the +/- buttons of the main map, where 100% is the
+# contiguous US filling the panel. Streamlit doesn't expose the map's view, so the
+# script finds the deck.gl instance through React's fiber tree; if that ever fails
+# (e.g. after a Streamlit upgrade) the box simply isn't shown. On load it also refits
+# the default view to the map's real width, which Python can only estimate.
+MAP_ZOOM_JS = r"""
+(() => {
+  if (window.__cognimapZoom) return;
+  window.__cognimapZoom = true;
+  const CFG = __CFG__;
+  const MIN_PCT = 20, MAX_PCT = 3200, STEP_PCT = 20, PRESETS = [50, 75, 100, 150, 200, 300, 400, 800, 1600];
+  const mercY = (lat) => {
+    const phi = Math.max(-85.05, Math.min(85.05, lat)) * Math.PI / 180;
+    return 256 * (1 - Math.log(Math.tan(Math.PI / 4 + phi / 2)) / Math.PI);
+  };
+  const unmercY = (y) => (2 * Math.atan(Math.exp(Math.PI * (1 - y / 256))) - Math.PI / 2) * 180 / Math.PI;
+  // Default view for this map's actual size (same formula as _fit_bounds in Python).
+  const fitView = (w, h) => {
+    const [w0, s0, e0, n0] = CFG.bounds, p = CFG.padding;
+    const dx = (e0 - w0) / 360 * 512, yt = mercY(n0), yb = mercY(s0);
+    const zoom = Math.log2(Math.min(w * (1 - 2 * p) / dx, h * (1 - 2 * p) / (yb - yt)));
+    return { latitude: unmercY((yt + yb) / 2), longitude: (w0 + e0) / 2, zoom };
+  };
+  const findDeck = (root) => {
+    const canvas = root.querySelector("canvas");
+    const key = canvas && Object.keys(canvas).find((k) => k.startsWith("__reactFiber$"));
+    for (let f = key && canvas[key], i = 0; f && i < 60; f = f.return, i++) {
+      for (let h = f.memoizedState; h && typeof h === "object" && "memoizedState" in h; h = h.next) {
+        const deck = h.memoizedState && h.memoizedState.current && h.memoizedState.current.deck;
+        if (deck && deck.props && typeof deck.props.onViewStateChange === "function") return deck;
+      }
+    }
+    return null;
+  };
+  const same = (a, b) => Math.abs(a.latitude - b.latitude) < 1e-6 &&
+    Math.abs(a.longitude - b.longitude) < 1e-6 && Math.abs(a.zoom - b.zoom) < 1e-6;
+  const setView = (deck, patch, duration) => {
+    const vs = { ...deck.props.viewState, ...patch };
+    if (duration) vs.transitionDuration = duration;
+    deck.props.onViewStateChange({ viewState: vs, interactionState: {}, oldViewState: deck.props.viewState });
+  };
+  const style = document.createElement("style");
+  style.textContent = `
+    .cog-zoom-pct { position: absolute; right: 0; }
+    .cog-zoom-pct input { width: 58px; box-sizing: border-box; padding: 3px 4px; text-align: center;
+      font: 12px system-ui, sans-serif; color: #31333f; background: #fff; border: 0; border-radius: 4px;
+      box-shadow: 0 0 0 2px rgba(0,0,0,.1); }
+    .cog-zoom-pct input:focus { outline: 2px solid #ff4b4b; outline-offset: 0; }
+    .cog-zoom-pct input::-webkit-calendar-picker-indicator { display: none !important; }`;
+  document.head.appendChild(style);
+  const list = document.createElement("datalist");
+  list.id = "cog-zoom-presets";
+  for (const p of PRESETS) list.appendChild(Object.assign(document.createElement("option"), { value: `${p}%` }));
+  document.body.appendChild(list);
+
+  const tick = () => document.querySelectorAll(CFG.selector).forEach((el) => {
+    const deck = findDeck(el);
+    const buttons = el.querySelector('[data-testid="stDeckGlJsonChartZoomButton"]');
+    if (!deck || !buttons || !deck.props.viewState) return;
+    const w = el.clientWidth, h = el.clientHeight, fit = fitView(w, h), vs = deck.props.viewState;
+    // Python's default view arrived (first load or after a filter reset): refit it to
+    // the real width, and keep refitting on resize while the user hasn't moved it.
+    const atDefault = same(vs, CFG.base) || (el.__cogFit && same(vs, el.__cogFit));
+    if (atDefault && !same(vs, fit)) {
+      el.__cogFit = fit;
+      setView(deck, fit);
+      return;
+    }
+    let box = buttons.querySelector(".cog-zoom-pct");
+    if (!box) {
+      box = document.createElement("div");
+      box.className = "cog-zoom-pct";
+      const input = Object.assign(document.createElement("input"), {
+        type: "text", inputMode: "numeric", title: "Map scale (100% = contiguous US). Type a value or pick a preset.",
+      });
+      input.setAttribute("list", "cog-zoom-presets");
+      input.setAttribute("aria-label", "Map zoom percentage");
+      box.appendChild(input);
+      buttons.appendChild(box);
+      const apply = () => {
+        const pct = parseFloat(input.value);
+        const d = findDeck(el);
+        if (d && pct > 0) {
+          const clamped = Math.max(MIN_PCT, Math.min(MAX_PCT, pct));
+          setView(d, { zoom: fitView(el.clientWidth, el.clientHeight).zoom + Math.log2(clamped / 100) }, 300);
+        }
+        input.blur();
+      };
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") apply(); if (e.key === "Escape") input.blur(); });
+      input.addEventListener("change", apply);
+      input.addEventListener("focus", () => input.select());
+      // Keep map gestures (drag, wheel) from starting on the box.
+      for (const t of ["pointerdown", "wheel", "dblclick"]) input.addEventListener(t, (e) => e.stopPropagation());
+    }
+    // Out of the flow (so the button column keeps its width), just under the buttons.
+    const nav = buttons.firstElementChild;
+    if (nav && nav !== box) {
+      box.style.top = `${nav.offsetTop + nav.offsetHeight + 6}px`;
+      box.style.right = `${buttons.clientWidth - nav.offsetLeft - nav.offsetWidth}px`;
+    }
+    const input = box.firstChild;
+    if (document.activeElement !== input) {
+      input.value = `${Math.round(100 * 2 ** (vs.zoom - fit.zoom))}%`;
+    }
+  });
+  setInterval(tick, 150);
+
+  // The +/- buttons step 20 percentage points (100 -> 120 -> 140) instead of the
+  // map's default doubling; an in-between value snaps to the next multiple of 20.
+  window.addEventListener("click", (e) => {
+    const btn = e.target instanceof Element && e.target.closest(".mapboxgl-ctrl-zoom-in, .mapboxgl-ctrl-zoom-out");
+    const el = btn && btn.closest(CFG.selector);
+    const deck = el && findDeck(el);
+    if (!deck || !deck.props.viewState) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const base = fitView(el.clientWidth, el.clientHeight).zoom;
+    const pct = 100 * 2 ** (deck.props.viewState.zoom - base);
+    const up = btn.classList.contains("mapboxgl-ctrl-zoom-in");
+    const next = up ? Math.floor(pct / STEP_PCT + 1e-6) * STEP_PCT + STEP_PCT
+                    : Math.ceil(pct / STEP_PCT - 1e-6) * STEP_PCT - STEP_PCT;
+    const clamped = Math.max(MIN_PCT, Math.min(MAX_PCT, next));
+    setView(deck, { zoom: base + Math.log2(clamped / 100) }, 200);
+  }, true);
+})();
+"""
+
+
+def install_map_scripts() -> None:
+    """Tooltip placement plus the zoom percentage box (see the scripts above)."""
+    cfg = {
+        "selector": '.st-key-risk_map_box [data-testid="stDeckGlJsonChart"]',
+        "bounds": CONTIGUOUS_US_BOUNDS, "padding": US_VIEW_PADDING,
+        "base": {"latitude": US_VIEW.latitude, "longitude": US_VIEW.longitude, "zoom": US_VIEW.zoom},
+    }
+    # One <script> element, and no "<tag"-like text inside it: st.html's sanitizer
+    # (DOMPurify) drops any script whose text looks like markup.
+    js = TOOLTIP_PLACEMENT_JS + MAP_ZOOM_JS.replace("__CFG__", json.dumps(cfg))
+    assert not re.search(r"<[/\w!]", js), "markup-like text in map script"
+    st.html(f"<script>{js}</script>", unsafe_allow_javascript=True)
 
 
 def open_profile_on_click(map_key: str, tab_key: str, tab_label: str) -> None:
@@ -667,25 +857,30 @@ def render_map(
                       "maxWidth": "280px"},
         },
     )
+    # Keyed container: pydeck charts carry no key class, and MAP_ZOOM_JS looks for this one.
+    box = st.container(key="risk_map_box")
     if on_click is None:
-        st.pydeck_chart(deck, height=MAP_HEIGHT_PX, key=key)
+        box.pydeck_chart(deck, height=MAP_HEIGHT_PX, key=key)
     else:
-        st.pydeck_chart(deck, height=MAP_HEIGHT_PX, key=key, on_select=on_click,
-                        selection_mode="single-object")
+        box.pydeck_chart(deck, height=MAP_HEIGHT_PX, key=key, on_select=on_click,
+                         selection_mode="single-object")
 
 
 def render_sori_map(
     geojson: dict, year_df: pd.DataFrame, panel: pd.DataFrame,
     selected_fips: set[str], view: pdk.ViewState, pin: dict | None = None,
-    highlight: list[pdk.Layer] = (), **map_kw,
+    highlight: list[pdk.Layer] = (), unit: str = "counties",
+    markers: dict[str, tuple[float, float]] | None = None, **map_kw,
 ) -> None:
     breaks = color_breaks(tuple(panel[COMPOSITE].astype(float)), len(SEQUENTIAL_RAMP))
     features = build_map_features(geojson, year_df, COMPOSITE, breaks, SEQUENTIAL_RAMP, selected_fips)
-    render_map([_county_layer(features)], view, pin, highlight, **map_kw)
+    render_map([_county_layer(features), *_marker_layer(features, markers or {})],
+               view, pin, highlight, **map_kw)
     _ramp_legend(SEQUENTIAL_RAMP, breaks, lambda v: f"{v:.0f}", COMPOSITE_LABEL)
     st.markdown(
         f"<div style='font-size:11px;color:{INK_MUTED}'>Classes are pooled quantiles across all "
-        "years, so colour shifts over time reflect real change. Gray: no estimate.</div>",
+        "years, so colour shifts over time reflect real change. Gray: no estimate."
+        f"{STATE_NOTE if unit == 'states' else ''}</div>",
         unsafe_allow_html=True,
     )
 
@@ -694,8 +889,12 @@ def render_overlay_map(
     geojson: dict, year_df: pd.DataFrame, panel: pd.DataFrame,
     selected_fips: set[str], view: pdk.ViewState, overlays: list[str],
     top_pct: int = PATTERN_TOP_DEFAULT, pin: dict | None = None,
-    highlight: list[pdk.Layer] = (), **map_kw,
+    highlight: list[pdk.Layer] = (), unit: str = "counties",
+    pattern_df: pd.DataFrame | None = None,
+    markers: dict[str, tuple[float, float]] | None = None, **map_kw,
 ) -> None:
+    """`pattern_df` holds the county rows that patterns are drawn on (default
+    `year_df`); the state view passes counties carrying their state's values."""
     show_cog = OUTCOME_MEASURE in overlays
     breaks = (
         color_breaks(tuple(panel[OUTCOME_MEASURE].astype(float)), len(COGNITION_RAMP))
@@ -707,7 +906,11 @@ def render_overlay_map(
     cutoffs = {
         m: percentile_cutoff(tuple(panel[m].astype(float)), 100 - top_pct) for m in SENSORY_MEASURES
     }
-    layers = [_county_layer(features), *pattern_layers(year_df, overlays, cutoffs, selected_fips, view)]
+    pattern_counties = year_df if pattern_df is None else pattern_df
+    pattern_fips = selected_fips if pattern_df is None else set(pattern_df["fips"])
+    layers = [_county_layer(features),
+              *pattern_layers(pattern_counties, overlays, cutoffs, pattern_fips, view),
+              *_marker_layer(features, markers or {})]
     render_map(layers, view, pin, highlight, **map_kw)
 
     if show_cog:
@@ -721,10 +924,25 @@ def render_overlay_map(
     if items:
         st.markdown(
             f"<div style='font-size:12px;color:{INK_SECONDARY};margin:8px 0 2px'>{''.join(items)}</div>"
-            f"<div style='font-size:11px;color:{INK_MUTED}'>Patterns mark counties in the top "
-            f"{top_pct}% of each measure (pooled across years). Gray: no estimate.</div>",
+            f"<div style='font-size:11px;color:{INK_MUTED}'>Patterns mark {unit} in the top "
+            f"{top_pct}% of each measure (pooled across years). Gray: no estimate."
+            f"{STATE_NOTE if unit == 'states' else ''}</div>",
             unsafe_allow_html=True,
         )
+
+
+STATE_NOTE = (
+    " State values: adult-population-weighted prevalence; the index is the average of county scores."
+)
+
+
+def render_geography_toggle(container) -> str:
+    """County / state radio, right-aligned above the map's top-right corner."""
+    return container.radio(
+        "Geography", options=list(GEOGRAPHIES), format_func=GEOGRAPHIES.get,
+        index=list(GEOGRAPHIES).index("state"),  # the first screen opens on the state map
+        horizontal=True, key="map_geo", label_visibility="collapsed", width="stretch",
+    )
 
 
 def _pattern_swatch(measure: str, width: int = 26, height: int = 14) -> str:

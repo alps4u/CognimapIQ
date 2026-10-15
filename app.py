@@ -22,6 +22,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+ui.install_map_styles()
 
 PLAY_INTERVAL_S = 1.6
 
@@ -42,6 +43,11 @@ def scored_panel(value_type: str, weights: tuple[tuple[str, float], ...]) -> pd.
     fits = model_fits(value_type)
     parts = [model.add_model_outputs(g, fits.get(y)) for y, g in panel.groupby("year")]
     return pd.concat(parts, ignore_index=True)
+
+
+@st.cache_data(show_spinner=False)
+def state_panel(value_type: str, weights: tuple[tuple[str, float], ...]) -> pd.DataFrame:
+    return model.state_summary(scored_panel(value_type, weights))
 
 
 @st.cache_data(show_spinner=False)
@@ -184,26 +190,43 @@ tab_map, tab_profile, tab_time, tab_model, tab_table = st.tabs(
 # Primary view — spatial map
 # --------------------------------------------------------------------------- #
 with tab_map:
-    geojson = dl.year_geojson(year)
+    overlay = controls.map_mode == "overlay"
+    title_col, geo_col = st.columns([3, 1], vertical_alignment="bottom")
+    title_col.markdown(
+        f"#### {'Cognitive & sensory overlay' if overlay else COMPOSITE_LABEL} ({year})"
+    )
+    by_state = ui.render_geography_toggle(geo_col) == "state"
     # A looked-up address zooms to its state unless the user has chosen a region.
     if pin and pin["state"] and not filtered:
         view = ui.view_state(set(year_all.loc[year_all["state"] == pin["state"], "fips"]), True)
     else:
         view = ui.view_state(selected_fips, filtered)
     highlight = ui.highlight_layers(year, selected_fips, filtered, pin)
-    # Clicking a county opens it in the County profile tab.
-    map_key = f"risk_map_{st.session_state.get('_map_nonce', 0)}"
-    map_click = {"key": map_key,
-                 "on_click": partial(ui.open_profile_on_click, map_key, "main_tab", PROFILE_TAB)}
-    if controls.map_mode == "overlay":
-        st.markdown(f"#### Cognitive & sensory overlay ({year})")
+    if by_state:
+        states = state_panel(VALUE_TYPE, tuple(sorted(weights.items())))
+        geojson, map_panel = dl.state_geojson(year), states
+        map_year = states[states["year"] == year]
+        map_selected = {f[:2] for f in selected_fips}
+        # States aren't profiled, so the state map has no click-through.
+        map_kw = {"key": "risk_map_state", "unit": "states", "markers": dl.small_state_points(year)}
+    else:
+        geojson, map_panel, map_year, map_selected = dl.year_geojson(year), panel, year_all, selected_fips
+        # Clicking a county opens it in the County profile tab.
+        map_key = f"risk_map_{st.session_state.get('_map_nonce', 0)}"
+        map_kw = {"key": map_key,
+                  "on_click": partial(ui.open_profile_on_click, map_key, "main_tab", PROFILE_TAB)}
+    if overlay:
         if not controls.overlays:
             st.info("Select at least one layer in the sidebar.")
-        ui.render_overlay_map(geojson, year_all, panel, selected_fips, view,
-                              controls.overlays, controls.pattern_top_pct, pin, highlight, **map_click)
+        if by_state:
+            # Patterns are drawn over each selected county, carrying its state's values.
+            values = map_year.set_index("fips")[[*SENSORY_MEASURES]]
+            counties = year_all.loc[year_all["fips"].isin(selected_fips), ["fips", "lat", "lon"]]
+            map_kw["pattern_df"] = counties.join(values, on=counties["fips"].str[:2])
+        ui.render_overlay_map(geojson, map_year, map_panel, map_selected, view,
+                              controls.overlays, controls.pattern_top_pct, pin, highlight, **map_kw)
     else:
-        st.markdown(f"#### {COMPOSITE_LABEL} ({year})")
-        ui.render_sori_map(geojson, year_all, panel, selected_fips, view, pin, highlight, **map_click)
+        ui.render_sori_map(geojson, map_year, map_panel, map_selected, view, pin, highlight, **map_kw)
 
     teeth_year = year_all["teethlost_source_year"].dropna()
     if len(teeth_year) and int(teeth_year.iloc[0]) != year:
@@ -214,7 +237,12 @@ with tab_map:
 
     w_txt = ", ".join(f"{MEASURE_LABELS[m]} {weights[m]:.0%}" for m in SENSORY_MEASURES)
     st.caption(f"{COMPOSITE_SHORT} weights ({controls.weight_mode.lower()}): {w_txt}")
-    st.caption("Click a county to open it in the County profile tab.")
+    if by_state:
+        st.caption("Switch to County to click a county and open its profile.")
+    else:
+        st.caption("Click a county to open it in the County profile tab.")
+    # Right after the map, so the zoom box doesn't wait for the other tabs on a cold start.
+    ui.install_map_scripts()
 
 # --------------------------------------------------------------------------- #
 # County profile — sensory burden and access to preventative care
@@ -322,8 +350,6 @@ st.caption(
     "Prototype (PoC) built on CDC PLACES as a stand-in for Canadian longitudinal data "
     "(CCHS, CLSA). Health-region boundaries will replace US counties after migration."
 )
-
-ui.install_tooltip_placement()
 
 # Continue timeline playback after the page has rendered.
 if st.session_state.get("playing"):
