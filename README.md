@@ -37,7 +37,7 @@ The processed snapshot in `data/processed/` is committed, so the app runs withou
 - **State Medicaid adult benefits (KFF):** whether adult dental, eyeglasses and hearing aids are covered, with copays, limits and prior approval.
 - **Medicare Advantage plans (CMS PBP 2026):** individual plans offered in the county and the share offering dental, comprehensive dental, hearing aids and eyewear, against state and US county medians, plus the full plan list.
 
-Every `?` tooltip that involves arithmetic gives the formula and a worked example, using the selected county's own numbers where possible. Every change label names its reference, for example `+1.2 pp (vs MA)`, `-14 (vs US)` or `+0.2 pp (vs 2022)`.
+Every `?` tooltip that involves arithmetic gives the formula and a worked example, using the selected county's own numbers where possible. Every change label names its reference, for example `+1.2 pp (vs MA)` or `-14 (vs US)`. The top KPI cards show only the change, such as `+0.2 pp`, beside each number; the line above them names the year it is compared with (`change vs 2022`). The County profile cards likewise put compact pills beside each number, `-0.8 AL` over `+1.2 US`, with a legend in the row's first slot.
 
 ## Data sources
 

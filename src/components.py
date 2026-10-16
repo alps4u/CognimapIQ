@@ -260,31 +260,35 @@ def _fmt_pct(v: float) -> str:
     return "–" if pd.isna(v) else f"{v:.1f}%"
 
 
-def _delta(cur: float, prev: float | None, vs: str, suffix: str = " pp") -> str | None:
-    """Change label naming its reference, e.g. "+0.2 pp (vs 2022)"."""
+def _delta(cur: float, prev: float | None, vs: str | None, suffix: str = " pp") -> str | None:
+    """Change label naming its reference, e.g. "+0.2 pp (vs 2022)"; just "+0.2 pp"
+    when `vs` is None because the caller names the reference once elsewhere."""
     if prev is None or pd.isna(cur) or pd.isna(prev):
         return None
     d = round(cur - prev, 1) + 0.0  # avoid "-0.0"
     if d == 0:
         return None  # e.g. biennial TEETHLOST carried forward
-    return f"{d:+.1f}{suffix} (vs {vs})"
+    label = f"{d:+.1f}{suffix}"
+    return label if vs is None else f"{label} (vs {vs})"
 
 
 def _vs(text: str, ref: str) -> str:
     return f"{text} (vs {ref})"
 
 
-def _us_badge(container, value: float, us_value: float, higher_is_worse: bool = True) -> None:
+def _us_badge(container, value: float, us_value: float, higher_is_worse: bool = True,
+              compact: bool = False) -> None:
     """Second comparison under a metric whose delta is vs the state, styled like a
-    delta pill: "+0.5 pp (vs US)", red when worse, green when better."""
+    delta pill: "+0.5 pp (vs US)", red when worse, green when better. `compact` gives
+    "+0.5 US" for cards whose legend already says the unit."""
     if pd.isna(value) or pd.isna(us_value):
         return
     d = round(value - us_value, 1) + 0.0
     if d == 0:
-        text, fg, bg = "0.0 pp (vs US)", INK_SECONDARY, "rgba(49,51,63,0.08)"
+        text, fg, bg = "0.0 US" if compact else "0.0 pp (vs US)", INK_SECONDARY, "rgba(49,51,63,0.08)"
     else:
         worse = (d > 0) == higher_is_worse
-        text = f"{'↑' if d > 0 else '↓'} {d:+.1f} pp (vs US)"
+        text = f"{'↑' if d > 0 else '↓'} " + (f"{d:+.1f} US" if compact else f"{d:+.1f} pp (vs US)")
         fg, bg = ("#bd2d2d", "rgba(255,75,75,0.12)") if worse else ("#177a3a", "rgba(33,195,84,0.12)")
     # Pulled up under the metric's own delta pill (Streamlit adds a block gap between elements).
     container.markdown(
@@ -302,15 +306,19 @@ WEIGHTED_RATE_HELP = (
 
 
 def render_kpis(stats: dict, prev: dict | None, region_label: str, prev_year: int | None = None) -> None:
-    st.markdown(f"**{region_label}**")
+    # The KPI pills sit right of the numbers, so they carry only the change and the
+    # reference year is named once here.
+    ref = "first year, no prior-year change" if prev is None else f"change vs {prev_year}"
+    st.markdown(f"**{region_label}** <span style='color:{INK_MUTED};font-size:0.85rem'>· {ref}</span>",
+                unsafe_allow_html=True)
     # The first year has no prior year to compare with. A neutral pill keeps the cards
     # the same height, so the map below doesn't jump when the year slider reaches it.
     def delta_kw(cur: float, prev_val: float | None, suffix: str = " pp") -> dict:
         if prev is None:
-            return {"delta": "Baseline year", "delta_color": "off", "delta_arrow": "off"}
-        return {"delta": _delta(cur, prev_val, str(prev_year), suffix), "delta_color": "inverse"}
+            return {"delta": "Baseline", "delta_color": "off", "delta_arrow": "off"}
+        return {"delta": _delta(cur, prev_val, None, suffix), "delta_color": "inverse"}
 
-    c = st.columns(6)
+    c = st.container(key="kpi_row").columns(6)
     c[0].metric(
         "Counties", f"{stats['counties']:,}",
         help=f"{stats['adults'] / 1e6:,.1f} M adults in selection",
@@ -663,6 +671,47 @@ MAP_NO_STALE_FADE_CSS = """
   transition: none !important;
 }
 .st-key-map_geo [role="radiogroup"] { justify-content: flex-end; }
+/* KPI cards: change vs the prior year sits right of the number instead of on its
+   own line, so the card row is shorter and the map starts higher. */
+.st-key-kpi_row [data-testid="stMetric"] > div {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 0.4rem;
+}
+.st-key-kpi_row [data-testid="stMetricLabel"] { grid-column: 1 / -1; }
+.st-key-kpi_row [data-testid="stMetricValue"] + div { min-width: 0; margin: 0; }
+.st-key-kpi_row [data-testid="stMetricValue"] { font-size: 1.9rem; }
+.st-key-kpi_row [data-testid="stMetricDelta"] { font-size: 0.8rem; padding: 0 0.4rem; }
+/* Narrow cards (small windows) can't fit both, so the change goes back under the number. */
+.st-key-kpi_row [data-testid="stMetric"] { container-type: inline-size; }
+@container (max-width: 150px) {
+  .st-key-kpi_row [data-testid="stMetric"] > div { grid-template-columns: minmax(0, 1fr); }
+}
+/* County profile cards: the same layout, with the vs-US pill (a separate element
+   after the metric) stacked under the vs-state pill. The metric's wrappers are
+   flattened so label, number and both pills share one grid per column. */
+.st-key-profile_kpis [data-testid="stColumn"] { container-type: inline-size; }
+.st-key-profile_kpis [data-testid="stColumn"] > [data-testid="stVerticalBlock"] {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center;
+  column-gap: 0.4rem; row-gap: 0.2rem;
+}
+.st-key-profile_kpis [data-testid="stElementContainer"]:has([data-testid="stMetric"]),
+.st-key-profile_kpis [data-testid="stMetric"],
+.st-key-profile_kpis [data-testid="stMetric"] > div { display: contents; }
+.st-key-profile_kpis [data-testid="stMetricLabel"] { grid-column: 1 / -1; }
+.st-key-profile_kpis [data-testid="stMetricValue"] { grid-column: 1; grid-row: 2 / span 2; font-size: 1.9rem; }
+.st-key-profile_kpis [data-testid="stMetricValue"] + div { grid-column: 2; grid-row: 2; min-width: 0; margin: 0; align-self: end; }
+.st-key-profile_kpis [data-testid="stElementContainer"]:has([data-testid="stMarkdown"]):not(:has([data-testid="stCaptionContainer"])) {
+  grid-column: 2; grid-row: 3; min-width: 0; align-self: start;
+}
+.st-key-profile_kpis [data-testid="stMarkdown"] div[style] { margin-top: 0 !important; }
+.st-key-profile_kpis [data-testid="stElementContainer"]:has([data-testid="stCaptionContainer"]) { grid-column: 1 / -1; }
+.st-key-profile_kpis [data-testid="stMetricDelta"] { font-size: 0.8rem; padding: 0 0.4rem; }
+.st-key-profile_kpis [data-testid="stMarkdown"] span { font-size: 0.8rem !important; padding: 0 0.4rem !important; }
+@container (max-width: 150px) {
+  .st-key-profile_kpis [data-testid="stColumn"] > [data-testid="stVerticalBlock"] { grid-template-columns: minmax(0, 1fr); }
+  .st-key-profile_kpis [data-testid="stMetricValue"] { grid-row: 2; }
+  .st-key-profile_kpis [data-testid="stMetricValue"] + div { grid-column: 1; grid-row: 3; }
+  .st-key-profile_kpis [data-testid="stElementContainer"]:has([data-testid="stMarkdown"]):not(:has([data-testid="stCaptionContainer"])) { grid-column: 1; grid-row: 4; }
+}
 </style>
 """
 
@@ -1409,9 +1458,11 @@ def _section(title: str, caption: str | None = None) -> None:
 
 
 def _profile_metrics(r: pd.Series, state_rows: pd.DataFrame, year_all: pd.DataFrame) -> None:
-    # Same 6-column grid as the KPI row, first slot (Counties) left empty, so each card
-    # sits under its national counterpart.
-    c = st.columns(6)[1:]
+    # Same 6-column grid as the KPI row, so each card sits under its national
+    # counterpart. The first slot (Counties) holds the legend for the compact pills
+    # that sit right of each number.
+    c0, *c = st.container(key="profile_kpis").columns(6)
+    c0.caption(f"Pills: pp above (+) or below (−) the adult-weighted {r['state']} and US averages.")
     score = r.get(COMPOSITE)
     c[0].metric(
         COMPOSITE_SHORT, "–" if pd.isna(score) else f"{score:.0f}", r.get("risk_tier") or None,
@@ -1428,7 +1479,7 @@ def _profile_metrics(r: pd.Series, state_rows: pd.DataFrame, year_all: pd.DataFr
         pct = (year_all[m].dropna() <= v).mean() * 100 if pd.notna(v) else float("nan")
         col.metric(
             MEASURE_LABELS[m], _fmt_pct(v),
-            _delta(v, state_avg, r["state"]),
+            None if (d := _delta(v, state_avg, None, "")) is None else f"{d} {r['state']}",  # sign first: it sets the arrow
             delta_color="inverse",
             help=(f"{MEASURE_DESCRIPTIONS[m]} Change = county rate − adult-weighted average: "
                   f"vs {r['state']} {v:.1f}% − {state_avg:.1f}% = {v - state_avg:+.1f} pp; "
@@ -1436,7 +1487,7 @@ def _profile_metrics(r: pd.Series, state_rows: pd.DataFrame, year_all: pd.DataFr
                   f"the rate is at or above that of {pct:.0f}% of US counties.") if pd.notna(pct)
             else MEASURE_DESCRIPTIONS[m],
         )
-        _us_badge(col, v, us_avg)
+        _us_badge(col, v, us_avg, compact=True)
 
 
 _MEDICAID_STATUS = {"Yes": "✓ Covered", "No": "✕ Not covered", "NR": "– Not reported"}

@@ -114,11 +114,6 @@ def _toggle_play() -> None:
 head_l, head_r = st.columns([3, 2], vertical_alignment="bottom")
 with head_l:
     ui.render_title("Cognimap IQ")
-    st.caption(
-        "Spatial evidence linking sensory impairment (vision, hearing and mastication) "
-        "to cognitive decline, to guide budgets toward low-cost preventative care during "
-        "the intervention window of opportunity."
-    )
 with head_r:
     slider_col, play_col = st.columns([4, 1], vertical_alignment="bottom")
     # Moving the slider by hand stops playback, so the next tick doesn't jump past the pick.
