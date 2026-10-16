@@ -30,6 +30,7 @@ from src.config import (
     DOT_SPACING_PX,
     DOT_SPACING_ZOOMS,
     FAVICON_PATH,
+    INTRO_PATH,
     GRIDLINE,
     INK_MUTED,
     INK_PRIMARY,
@@ -80,12 +81,37 @@ def _icon_data_uri(size_px: int = 128) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
+@st.cache_data(show_spinner=False)
+def _intro_image(width_px: int = 1800) -> bytes:
+    """Intro slide downsized to dialog width and saved as JPEG (2.1 MB PNG -> a few
+    hundred KB), so the popup opens quickly."""
+    im = Image.open(INTRO_PATH).convert("RGB")
+    im = im.resize((width_px, round(im.height * width_px / im.width)), Image.LANCZOS)
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", quality=88, optimize=True)
+    return buf.getvalue()
+
+
+@st.dialog("About Cognimap IQ", width="large")
+def _show_intro() -> None:
+    st.image(_intro_image(), width="stretch")
+
+
 def render_title(text: str) -> None:
-    st.markdown(
-        f"<h1 style='display:flex;align-items:center'>{text}"
-        f"<img src='{_icon_data_uri()}' alt='' style='height:1.25em;width:1.25em;margin-left:0.3em'/></h1>",
-        unsafe_allow_html=True,
+    """App title with its logo. The logo is a button (styled with the logo image,
+    since markdown images can't be clicked) that opens the intro slide in a popup."""
+    st.html(
+        "<style>.st-key-intro_logo button { width: 3.4rem; height: 3.4rem; min-height: 0; padding: 0; position: relative; top: 0.45rem;"
+        f" border: none; border-radius: 50%; background: url('{_icon_data_uri()}') center / contain no-repeat;"
+        " color: transparent; font-size: 0; cursor: pointer; }"
+        ".st-key-intro_logo button:hover, .st-key-intro_logo button:focus-visible"
+        " { box-shadow: 0 0 0 3px rgba(142, 68, 173, 0.35); background-color: transparent; }"
+        ".st-key-intro_logo button:active { transform: scale(0.96); background-color: transparent; }</style>"
     )
+    row = st.container(horizontal=True, vertical_alignment="center", gap="small")
+    row.markdown(f"<h1 style='padding:0'>{text}</h1>", unsafe_allow_html=True, width="content")
+    if row.button("About Cognimap IQ", key="intro_logo", help="About Cognimap IQ"):
+        _show_intro()
 
 
 # --------------------------------------------------------------------------- #
@@ -292,7 +318,7 @@ def _us_badge(container, value: float, us_value: float, higher_is_worse: bool = 
         fg, bg = ("#bd2d2d", "rgba(255,75,75,0.12)") if worse else ("#177a3a", "rgba(33,195,84,0.12)")
     # Pulled up under the metric's own delta pill (Streamlit adds a block gap between elements).
     container.markdown(
-        f"<div style='margin-top:-0.85rem'><span style='display:inline-block;padding:0 0.45rem;"
+        f"<div class='us-badge' style='margin-top:-0.85rem'><span style='display:inline-block;padding:0 0.45rem;"
         f"border-radius:999px;background:{bg};color:{fg};font-size:0.8rem;line-height:1.5rem'>"
         f"{text}</span></div>",
         unsafe_allow_html=True,
@@ -685,32 +711,39 @@ MAP_NO_STALE_FADE_CSS = """
 @container (max-width: 150px) {
   .st-key-kpi_row [data-testid="stMetric"] > div { grid-template-columns: minmax(0, 1fr); }
 }
-/* County profile cards: the same layout, with the vs-US pill (a separate element
+/* County profile and nursing home cards: the same layout, with the vs-US pill (a separate element
    after the metric) stacked under the vs-state pill. The metric's wrappers are
    flattened so label, number and both pills share one grid per column. */
-.st-key-profile_kpis [data-testid="stColumn"] { container-type: inline-size; }
-.st-key-profile_kpis [data-testid="stColumn"] > [data-testid="stVerticalBlock"] {
-  display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center;
-  column-gap: 0.4rem; row-gap: 0.2rem;
+:is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stColumn"] { container-type: inline-size; }
+:is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stColumn"] > [data-testid="stVerticalBlock"] {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; align-content: start;
+  column-gap: 0.4rem; row-gap: 0.15rem;
 }
-.st-key-profile_kpis [data-testid="stElementContainer"]:has([data-testid="stMetric"]),
-.st-key-profile_kpis [data-testid="stMetric"],
-.st-key-profile_kpis [data-testid="stMetric"] > div { display: contents; }
-.st-key-profile_kpis [data-testid="stMetricLabel"] { grid-column: 1 / -1; }
-.st-key-profile_kpis [data-testid="stMetricValue"] { grid-column: 1; grid-row: 2 / span 2; font-size: 1.9rem; }
-.st-key-profile_kpis [data-testid="stMetricValue"] + div { grid-column: 2; grid-row: 2; min-width: 0; margin: 0; align-self: end; }
-.st-key-profile_kpis [data-testid="stElementContainer"]:has([data-testid="stMarkdown"]):not(:has([data-testid="stCaptionContainer"])) {
+:is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stElementContainer"]:has([data-testid="stMetric"]),
+:is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stMetric"],
+:is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stMetric"] > div { display: contents; }
+:is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stMetricLabel"] { grid-column: 1 / -1; }
+:is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stMetricValue"] { grid-column: 1; grid-row: 2; font-size: 1.9rem; }
+:is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stMetricValue"] + div { grid-column: 2; grid-row: 2; min-width: 0; margin: 0; padding: 0; }
+/* With a vs-US pill under it, the number spans both pill rows. */
+:is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stVerticalBlock"]:has(.us-badge) [data-testid="stMetricValue"] { grid-row: 2 / span 2; }
+:is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stVerticalBlock"]:has(.us-badge) [data-testid="stMetricValue"] + div { align-self: end; }
+:is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stElementContainer"]:has(.us-badge) {
   grid-column: 2; grid-row: 3; min-width: 0; align-self: start;
 }
-.st-key-profile_kpis [data-testid="stMarkdown"] div[style] { margin-top: 0 !important; }
-.st-key-profile_kpis [data-testid="stElementContainer"]:has([data-testid="stCaptionContainer"]) { grid-column: 1 / -1; }
-.st-key-profile_kpis [data-testid="stMetricDelta"] { font-size: 0.8rem; padding: 0 0.4rem; }
-.st-key-profile_kpis [data-testid="stMarkdown"] span { font-size: 0.8rem !important; padding: 0 0.4rem !important; }
-@container (max-width: 150px) {
-  .st-key-profile_kpis [data-testid="stColumn"] > [data-testid="stVerticalBlock"] { grid-template-columns: minmax(0, 1fr); }
-  .st-key-profile_kpis [data-testid="stMetricValue"] { grid-row: 2; }
-  .st-key-profile_kpis [data-testid="stMetricValue"] + div { grid-column: 1; grid-row: 3; }
-  .st-key-profile_kpis [data-testid="stElementContainer"]:has([data-testid="stMarkdown"]):not(:has([data-testid="stCaptionContainer"])) { grid-column: 1; grid-row: 4; }
+:is(.st-key-profile_kpis, .st-key-nh_kpis) .us-badge { margin-top: 0 !important; }
+:is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stElementContainer"]:has([data-testid="stCaptionContainer"]) { grid-column: 1 / -1; }
+:is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stMetricDelta"] { font-size: 0.8rem; padding: 0 0.4rem; }
+:is(.st-key-profile_kpis, .st-key-nh_kpis) .us-badge span { font-size: 0.8rem !important; padding: 0 0.4rem !important; line-height: 17px !important; }
+/* Pull the vs-US pill up under the vs-state pill: drop the markdown block's spacing. */
+:is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stElementContainer"]:has(.us-badge) :is([data-testid="stMarkdown"], [data-testid="stMarkdownContainer"], .us-badge) { margin: 0 !important; line-height: 17px; }
+/* Their pills are wider than the top row's, so they stack sooner. */
+@container (max-width: 158px) {
+  :is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stColumn"] > [data-testid="stVerticalBlock"] { grid-template-columns: minmax(0, 1fr); }
+  :is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stMetricValue"],
+  :is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stVerticalBlock"]:has(.us-badge) [data-testid="stMetricValue"] { grid-row: 2; }
+  :is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stMetricValue"] + div { grid-column: 1; grid-row: 3; }
+  :is(.st-key-profile_kpis, .st-key-nh_kpis) [data-testid="stElementContainer"]:has(.us-badge) { grid-column: 1; grid-row: 4; }
 }
 </style>
 """
@@ -1844,7 +1877,8 @@ def _nh_findings(name: str, c: pd.Series, us: dict, cog_pct: float) -> list[str]
 def _render_nursing_homes(nh: NursingHomes | None, fips: str, r: pd.Series, year_all: pd.DataFrame) -> None:
     _section("Nursing homes & dementia care (CMS)",
              "Medicare- and Medicaid-certified nursing homes in the county set against older adults with "
-             "a cognitive difficulty. Quality measures are resident-weighted averages.")
+             "a cognitive difficulty. Quality measures are resident-weighted averages. Pills beside each "
+             f"number: difference from the {r['state']} or US average (pp for the rate).")
     if nh is None:
         st.info("Nursing home data is not built yet. Run `python scripts/preprocess_access.py`.")
         return
@@ -1856,10 +1890,12 @@ def _render_nursing_homes(nh: NursingHomes | None, fips: str, r: pd.Series, year
     us = nh.us
     cog_pct = (nh.by_fips["cog65_rate"].dropna() <= c["cog65_rate"]).mean() * 100
 
-    m = st.columns(5)
+    # Same compact layout as the profile cards above (CSS keyed on nh_kpis).
+    m = st.container(key="nh_kpis").columns(5)
     m[0].metric(
         "65+ cognitive difficulty", f"{c['cog65_rate']:.1f}%",
-        None if state is None else _delta(c["cog65_rate"], state["cog65_rate"], r["state"]),
+        None if state is None or (d := _delta(c["cog65_rate"], state["cog65_rate"], None, "")) is None
+        else f"{d} {r['state']}",
         delta_color="inverse",
         help=(f"Adults 65+ with a cognitive difficulty ÷ all adults 65+ × 100 (ACS 5-year, table B18104). "
               f"Here: {int(c['cog65']):,} ÷ {int(c['pop65']):,} × 100 = {c['cog65_rate']:.1f}%, about 1 in "
@@ -1867,7 +1903,7 @@ def _render_nursing_homes(nh: NursingHomes | None, fips: str, r: pd.Series, year
               f"vs US: {c['cog65_rate']:.1f}% − {us['cog65_rate']:.1f}% = "
               f"{c['cog65_rate'] - us['cog65_rate']:+.1f} pp."),
     )
-    _us_badge(m[0], c["cog65_rate"], us["cog65_rate"])
+    _us_badge(m[0], c["cog65_rate"], us["cog65_rate"], compact=True)
     m[1].metric("Nursing homes", f"{int(c['facilities']):,}")
     m[2].metric("Certified beds", f"{int(c['beds']):,}",
                 help=None if c["facilities"] == 0 else
@@ -1876,7 +1912,7 @@ def _render_nursing_homes(nh: NursingHomes | None, fips: str, r: pd.Series, year
     m[3].metric("Beds per 100 at-risk seniors",
                 "–" if pd.isna(c["beds_per_100_cog65"]) else f"{c['beds_per_100_cog65']:.0f}",
                 None if pd.isna(c["beds_per_100_cog65"]) else
-                _vs(f"{c['beds_per_100_cog65'] - us['beds_per_100_cog65']:+.0f}", "US"),
+                f"{c['beds_per_100_cog65'] - us['beds_per_100_cog65']:+.0f} US",
                 delta_color="normal",  # fewer beds than the US = capacity gap (red), as in the findings
                 help=("Certified nursing home beds ÷ adults 65+ with a cognitive difficulty × 100. "
                       + ("" if pd.isna(c["beds_per_100_cog65"]) else
@@ -1887,7 +1923,7 @@ def _render_nursing_homes(nh: NursingHomes | None, fips: str, r: pd.Series, year
                         "dementia and not all people with dementia need a nursing home; read as capacity context."))
     m[4].metric("Avg. overall rating", "–" if pd.isna(c.get("overall_rating")) else f"{c['overall_rating']:.1f} ★",
                 None if pd.isna(c.get("overall_rating")) else
-                _vs(f"{c['overall_rating'] - us['overall_rating']:+.1f}", "US"),
+                f"{c['overall_rating'] - us['overall_rating']:+.1f} US",
                 delta_color="normal",
                 help="Resident-weighted CMS overall star rating: Σ(stars × residents) ÷ Σ residents. Example: "
                      "a 5★ home with 100 residents and a 2★ home with 50 average (5 × 100 + 2 × 50) ÷ 150 = 4.0★.")

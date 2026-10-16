@@ -337,24 +337,28 @@ def uds_county_summary(
 NH_WEIGHTED = [*NH_MEASURES, *NH_OTHER]
 
 
-def _nh_summary(df: pd.DataFrame) -> dict:
-    """Capacity, resident-weighted quality measures and citations per facility."""
+def _nh_summary(df: pd.DataFrame, keys: pd.Series) -> pd.DataFrame:
+    """Capacity, resident-weighted quality measures and citations per facility, one
+    row per group in `keys`. Grouped sums rather than a loop over groups: the
+    county loop took ~13 s on a cold start and blocked the first page render."""
     w = df["residents"].fillna(df["beds"]).fillna(0)
-    out = {"facilities": len(df), "beds": float(df["beds"].sum()), "residents": float(df["residents"].sum())}
+    g = df.groupby(keys)
+    out = pd.DataFrame({"facilities": g.size(), "beds": g["beds"].sum(), "residents": g["residents"].sum()})
     for c in NH_WEIGHTED:
         ok = df[c].notna() & (w > 0)
-        out[c] = float((df.loc[ok, c] * w[ok]).sum() / w[ok].sum()) if ok.any() else float("nan")
+        den = w.where(ok).groupby(keys).sum()
+        out[c] = ((df[c] * w).where(ok).groupby(keys).sum() / den).where(den > 0)
     for c in NH_CITATIONS:
-        out[c] = float(df[c].sum() / len(df)) if len(df) else float("nan")
-    out["cited_dementia_share"] = float((df["cit_dementia_care"] > 0).mean()) if len(df) else float("nan")
-    return out
+        out[c] = g[c].sum() / out["facilities"]
+    out["cited_dementia_share"] = (df["cit_dementia_care"] > 0).groupby(keys).mean()
+    return out.astype(float)
 
 
 def nh_summaries(nh: pd.DataFrame, seniors: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """Nursing home summaries by county and by state, plus the national one, each
     with certified beds per 100 adults 65+ with a cognitive difficulty."""
     nh = nh.dropna(subset=["fips"])
-    by_fips = pd.DataFrame({f: _nh_summary(g) for f, g in nh.groupby("fips")}).T
+    by_fips = _nh_summary(nh, nh["fips"])
     by_fips = by_fips.join(seniors.set_index("fips")[["pop65", "cog65", "cog65_rate"]], how="outer")
     by_fips["facilities"] = by_fips["facilities"].fillna(0)
     by_fips["beds"] = by_fips["beds"].fillna(0)
@@ -362,12 +366,12 @@ def nh_summaries(nh: pd.DataFrame, seniors: pd.DataFrame) -> tuple[pd.DataFrame,
 
     seniors_state = seniors.assign(statefp=seniors["fips"].str[:2])
     state_cog = seniors_state.groupby("statefp")[["pop65", "cog65"]].sum()
-    by_state = pd.DataFrame({s: _nh_summary(g) for s, g in nh.groupby(nh["fips"].str[:2])}).T
+    by_state = _nh_summary(nh, nh["fips"].str[:2])
     by_state = by_state.join(state_cog)
     by_state["cog65_rate"] = by_state["cog65"].astype(float) / by_state["pop65"].astype(float) * 100
     by_state["beds_per_100_cog65"] = by_state["beds"] / by_state["cog65"].astype(float) * 100
 
-    us = _nh_summary(nh)
+    us = _nh_summary(nh, pd.Series("US", index=nh.index)).iloc[0].to_dict()
     us["cog65_rate"] = float(seniors["cog65"].sum() / seniors["pop65"].sum() * 100)
     us["beds_per_100_cog65"] = us["beds"] / float(seniors["cog65"].sum()) * 100
     us["county_median_cog65_rate"] = float(seniors["cog65_rate"].median())

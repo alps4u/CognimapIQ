@@ -26,6 +26,15 @@ ui.install_map_styles()
 
 PLAY_INTERVAL_S = 1.6
 
+# Only the open tab is built on each run (st.tabs with on_change="rerun" exposes
+# `.open`), which saves ~1 s per rerun. Streamlit drops the state of widgets that
+# weren't drawn, so the hidden tabs' picks are re-stored here to survive a tab switch.
+KEEP_WIDGET_STATE = ["profile_state", "profile_fips", "uds_service", "uds_org", "top_n",
+                     *(f"red_{m}" for m in SENSORY_MEASURES)]
+for _k in KEEP_WIDGET_STATE:
+    if _k in st.session_state:
+        st.session_state[_k] = st.session_state[_k]
+
 
 # --------------------------------------------------------------------------- #
 # Cached analytics
@@ -242,104 +251,108 @@ with tab_map:
 # --------------------------------------------------------------------------- #
 # County profile — sensory burden and access to preventative care
 # --------------------------------------------------------------------------- #
-with tab_profile:
-    profile_fips = ui.render_county_picker(year_all, pin)
-    ui.render_county_profile(profile_fips, panel, year, county_access())
+if tab_profile.open:  # hidden tabs are skipped; see KEEP_WIDGET_STATE
+    with tab_profile:
+        profile_fips = ui.render_county_picker(year_all, pin)
+        ui.render_county_profile(profile_fips, panel, year, county_access())
 
 # --------------------------------------------------------------------------- #
 # Secondary view — longitudinal & policy
 # --------------------------------------------------------------------------- #
-with tab_time:
-    left, right = st.columns([3, 2])
-    with left:
-        trend = model.national_trend(region)
-        st.plotly_chart(
-            ui.trend_chart(trend, year, f"Prevalence trend in {region_label}"),
-            width="stretch",
-        )
-    with right:
-        st.plotly_chart(
-            ui.score_trend_chart(panel, selected_fips if filtered else set(),
-                                 f"{COMPOSITE_SHORT} distribution over time"),
-            width="stretch",
-        )
-    st.markdown("##### Policy & evidence milestones")
-    st.caption("Numbered markers on the trend chart. Dotted lines are coloured by sensory domain.")
-    ui.render_policy_timeline()
+if tab_time.open:  # hidden tabs are skipped; see KEEP_WIDGET_STATE
+    with tab_time:
+        left, right = st.columns([3, 2])
+        with left:
+            trend = model.national_trend(region)
+            st.plotly_chart(
+                ui.trend_chart(trend, year, f"Prevalence trend in {region_label}"),
+                width="stretch",
+            )
+        with right:
+            st.plotly_chart(
+                ui.score_trend_chart(panel, selected_fips if filtered else set(),
+                                     f"{COMPOSITE_SHORT} distribution over time"),
+                width="stretch",
+            )
+        st.markdown("##### Policy & evidence milestones")
+        st.caption("Numbered markers on the trend chart. Dotted lines are coloured by sensory domain.")
+        ui.render_policy_timeline()
 
-    if len(years) > 1:
-        st.markdown(f"##### Largest increases in {COMPOSITE_LABEL}, {years[0]} → {years[-1]}")
-        change = model.county_change(region, COMPOSITE, years[0], years[-1])
-        change_col = f"Change ({years[-1]} vs {years[0]})"
-        st.dataframe(
-            change.sort_values("change", ascending=False).head(15)
-            .rename(columns={"county": "County", "state": "State", "start": str(years[0]),
-                             "end": str(years[-1]), "change": change_col})
-            .drop(columns="fips"),
-            hide_index=True, width="stretch",
-            column_config={
-                str(years[0]): st.column_config.NumberColumn(format="%.0f"),
-                str(years[-1]): st.column_config.NumberColumn(format="%.0f"),
-                change_col: st.column_config.NumberColumn(
-                    format="%+.0f",
-                    help=f"{COMPOSITE_SHORT} {years[-1]} − {COMPOSITE_SHORT} {years[0]}. Example: 40 → 55 = +15, "
-                         "i.e. the county moved 15 places up the 0–100 burden ranking."),
-            },
-        )
+        if len(years) > 1:
+            st.markdown(f"##### Largest increases in {COMPOSITE_LABEL}, {years[0]} → {years[-1]}")
+            change = model.county_change(region, COMPOSITE, years[0], years[-1])
+            change_col = f"Change ({years[-1]} vs {years[0]})"
+            st.dataframe(
+                change.sort_values("change", ascending=False).head(15)
+                .rename(columns={"county": "County", "state": "State", "start": str(years[0]),
+                                 "end": str(years[-1]), "change": change_col})
+                .drop(columns="fips"),
+                hide_index=True, width="stretch",
+                column_config={
+                    str(years[0]): st.column_config.NumberColumn(format="%.0f"),
+                    str(years[-1]): st.column_config.NumberColumn(format="%.0f"),
+                    change_col: st.column_config.NumberColumn(
+                        format="%+.0f",
+                        help=f"{COMPOSITE_SHORT} {years[-1]} − {COMPOSITE_SHORT} {years[0]}. Example: 40 → 55 = +15, "
+                             "i.e. the county moved 15 places up the 0–100 burden ranking."),
+                },
+            )
 
 # --------------------------------------------------------------------------- #
 # Predictive analytics engine
 # --------------------------------------------------------------------------- #
-with tab_model:
-    if fit is None:
-        st.info("Not enough data to fit the association model for this year.")
-    else:
-        st.markdown(
-            f"**Association model ({year}, national, {VALUE_TYPE_LABEL.lower()}):** "
-            f"Cognitive decline ~ Vision + Hearing + Complete tooth loss; "
-            f"n = {fit.n:,} counties, R² = {fit.r2:.2f}"
-        )
-        c1, c2 = st.columns([3, 2])
-        with c1:
-            st.plotly_chart(ui.scatter_chart(year_df, fit), width="stretch")
-        with c2:
-            st.plotly_chart(ui.coefficient_chart(fit), width="stretch")
-            ui.render_model_table(fit)
-            st.caption(
-                "Ecological, cross-sectional association across counties. It identifies where "
-                "sensory burden and cognitive decline co-occur; it does not establish causation."
+if tab_model.open:  # hidden tabs are skipped; see KEEP_WIDGET_STATE
+    with tab_model:
+        if fit is None:
+            st.info("Not enough data to fit the association model for this year.")
+        else:
+            st.markdown(
+                f"**Association model ({year}, national, {VALUE_TYPE_LABEL.lower()}):** "
+                f"Cognitive decline ~ Vision + Hearing + Complete tooth loss; "
+                f"n = {fit.n:,} counties, R² = {fit.r2:.2f}"
             )
+            c1, c2 = st.columns([3, 2])
+            with c1:
+                st.plotly_chart(ui.scatter_chart(year_df, fit), width="stretch")
+            with c2:
+                st.plotly_chart(ui.coefficient_chart(fit), width="stretch")
+                ui.render_model_table(fit)
+                st.caption(
+                    "Ecological, cross-sectional association across counties. It identifies where "
+                    "sensory burden and cognitive decline co-occur; it does not establish causation."
+                )
 
-        st.divider()
-        st.markdown("#### Preventative-care scenario")
-        st.caption(
-            "Simulate relative reductions in sensory impairment prevalence for the selected "
-            "region (e.g. subsidised hearing aids, vision screening, dental/denture coverage) "
-            "and see the model-expected change in cognitive decline."
-        )
-        sc = st.columns(3)
-        reductions = {
-            m: sc[i].slider(f"{MEASURE_LABELS[m]} reduction", 0, 50, 20, 5, format="%d%%",
-                            key=f"red_{m}") / 100
-            for i, m in enumerate(SENSORY_MEASURES)
-        }
-        ui.render_scenario(model.run_scenario(year_df, fit, reductions))
+            st.divider()
+            st.markdown("#### Preventative-care scenario")
+            st.caption(
+                "Simulate relative reductions in sensory impairment prevalence for the selected "
+                "region (e.g. subsidised hearing aids, vision screening, dental/denture coverage) "
+                "and see the model-expected change in cognitive decline."
+            )
+            sc = st.columns(3)
+            reductions = {
+                m: sc[i].slider(f"{MEASURE_LABELS[m]} reduction", 0, 50, 20, 5, format="%d%%",
+                                key=f"red_{m}") / 100
+                for i, m in enumerate(SENSORY_MEASURES)
+            }
+            ui.render_scenario(model.run_scenario(year_df, fit, reductions))
 
 # --------------------------------------------------------------------------- #
 # Priority regions
 # --------------------------------------------------------------------------- #
-with tab_table:
-    t1, t2 = st.columns([3, 1], vertical_alignment="bottom")
-    t1.markdown(f"#### Intervention priority in {region_label} ({year})")
-    top_n = t2.selectbox("Show Top", [25, 50, 100, 250, 500], index=1)
-    ui.render_priority_table(year_df, top_n)
-    export = year_df.drop(columns=[c for c in year_df.columns if c.startswith("z_")])
-    st.download_button(
-        "Download selection (CSV)",
-        export.to_csv(index=False).encode("utf-8"),
-        file_name=f"cognimap_{year}.csv",
-        mime="text/csv",
-    )
+if tab_table.open:  # hidden tabs are skipped; see KEEP_WIDGET_STATE
+    with tab_table:
+        t1, t2 = st.columns([3, 1], vertical_alignment="bottom")
+        t1.markdown(f"#### Intervention priority in {region_label} ({year})")
+        top_n = t2.selectbox("Show Top", [25, 50, 100, 250, 500], index=1, key="top_n")
+        ui.render_priority_table(year_df, top_n)
+        export = year_df.drop(columns=[c for c in year_df.columns if c.startswith("z_")])
+        st.download_button(
+            "Download selection (CSV)",
+            export.to_csv(index=False).encode("utf-8"),
+            file_name=f"cognimap_{year}.csv",
+            mime="text/csv",
+        )
 
 st.caption(
     "Prototype (PoC) built on CDC PLACES as a stand-in for Canadian longitudinal data "

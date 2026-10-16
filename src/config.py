@@ -10,6 +10,7 @@ DATA_DIR = ROOT / "data" / "processed"
 PLACES_PATH = DATA_DIR / "places_county.parquet"
 COUNTIES_PATH = DATA_DIR / "counties.parquet"
 FAVICON_PATH = ROOT / "assets" / "favicon.png"
+INTRO_PATH = ROOT / "assets" / "Intro.png"  # shown when the title logo is clicked
 # Care-access snapshot (scripts/preprocess_access.py)
 MEDICAID_PATH = DATA_DIR / "medicaid_benefits.parquet"
 MA_PLANS_PATH = DATA_DIR / "ma_plans.parquet"
