@@ -77,8 +77,31 @@ def state_options() -> pd.DataFrame:
     return df.sort_values("state_name").reset_index(drop=True)
 
 
+def _stable_order(by_year: dict[int, gpd.GeoDataFrame], year: int, key: str) -> gpd.GeoDataFrame:
+    """One year's shapes in an order that is the same in every year.
+
+    deck.gl's fill-colour transition interpolates vertex by vertex, so a shape has to
+    sit at the same place in every year's layer; otherwise the old year's colours land
+    on the wrong polygons mid-transition and the map breaks into shards. Shapes shared
+    by all years come first in `key` order; shapes that exist or differ only in some
+    years (Connecticut's counties vs planning regions) go last, where they can't shift
+    the rest.
+    """
+    wkb = {y: dict(zip(g[key], g.geometry.to_wkb())) for y, g in by_year.items()}
+    gdf = by_year[year]
+    shared = gdf[key].map(lambda k: all(w.get(k) == wkb[year][k] for w in wkb.values()))
+    out = gdf.assign(_late=~shared).sort_values(["_late", key]).drop(columns="_late")
+    return out.reset_index(drop=True)
+
+
 @st.cache_data(show_spinner="Assembling county geometry…")
 def year_geometry(year: int) -> gpd.GeoDataFrame:
+    """Boundary set for one analysis year, in the same feature order every year."""
+    return _stable_order({y: _year_features(y) for y in available_years()}, year, "fips")
+
+
+@st.cache_data(show_spinner=False)
+def _year_features(year: int) -> gpd.GeoDataFrame:
     """Boundary set matching the FIPS scheme used by one analysis year.
 
     Boundaries changed during the study period (e.g. Connecticut moved from
@@ -134,6 +157,12 @@ def selection_outline(fips: tuple[str, ...], year: int, by_state: bool) -> dict:
 
 @st.cache_data(show_spinner="Assembling state geometry…")
 def state_geometry(year: int) -> gpd.GeoDataFrame:
+    """The year's state shapes, in the same order every year."""
+    return _stable_order({y: _state_shapes(y) for y in available_years()}, year, "statefp")
+
+
+@st.cache_data(show_spinner=False)
+def _state_shapes(year: int) -> gpd.GeoDataFrame:
     """The year's counties dissolved into one shape per state (`statefp`)."""
     gdf = year_geometry(year)
     # County edges don't meet exactly, so a plain dissolve leaves seam lines inside
