@@ -700,6 +700,12 @@ MAP_NO_STALE_FADE_CSS = """
   opacity: 1 !important;
   transition: none !important;
 }
+/* Top whitespace: Streamlit reserves a 3.75rem header bar plus 6rem of padding above
+   the page. The bar now takes no space; only its run-status indicator (and the button
+   that reopens a collapsed sidebar) float over the page, and the menu is hidden. */
+[data-testid="stMainBlockContainer"] { padding-top: 0.5rem; }
+[data-testid="stHeader"] { height: 0; min-height: 0; background: transparent; overflow: visible; }
+[data-testid="stToolbarActions"], [data-testid="stMainMenu"], [data-testid="stAppDeployButton"] { display: none; }
 .st-key-map_geo [role="radiogroup"] { justify-content: flex-end; }
 /* KPI cards: change vs the prior year sits right of the number instead of on its
    own line, so the card row is shorter and the map starts higher. */
