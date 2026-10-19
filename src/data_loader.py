@@ -14,6 +14,7 @@ from pyproj import Transformer
 
 from src.config import (
     COUNTIES_PATH,
+    COUNTY_SHAPES_PATH,
     CRS,
     HC_SITES_PATH,
     HC_UDS_PATH,
@@ -79,7 +80,7 @@ def state_options() -> pd.DataFrame:
     return df.sort_values("state_name").reset_index(drop=True)
 
 
-def _stable_order(by_year: dict[int, gpd.GeoDataFrame], year: int, key: str) -> gpd.GeoDataFrame:
+def stable_order(by_year: dict[int, gpd.GeoDataFrame], year: int, key: str) -> gpd.GeoDataFrame:
     """One year's shapes in an order that is the same in every year.
 
     deck.gl's fill-colour transition interpolates vertex by vertex, so a shape has to
@@ -96,10 +97,19 @@ def _stable_order(by_year: dict[int, gpd.GeoDataFrame], year: int, key: str) -> 
     return out.reset_index(drop=True)
 
 
+@st.cache_data(show_spinner=False)
+def _load_county_shapes() -> gpd.GeoDataFrame | None:
+    return gpd.read_parquet(COUNTY_SHAPES_PATH) if COUNTY_SHAPES_PATH.exists() else None
+
+
 @st.cache_data(show_spinner="Assembling county geometry…")
 def year_geometry(year: int) -> gpd.GeoDataFrame:
-    """Boundary set for one analysis year, in the same feature order every year."""
-    return _stable_order({y: _year_features(y) for y in available_years()}, year, "fips")
+    """Boundary set for one analysis year, in the same feature order every year and
+    snapped to COORD_GRID. Precomputed by scripts/preprocess.py (~1 s otherwise)."""
+    shapes = _load_county_shapes()
+    if shapes is not None and year in set(shapes["year"]):
+        return shapes.loc[shapes["year"] == year].drop(columns="year").reset_index(drop=True)
+    return snap(stable_order({y: _year_features(y) for y in available_years()}, year, "fips"))
 
 
 @st.cache_data(show_spinner=False)
@@ -164,7 +174,7 @@ def selection_outline(fips: tuple[str, ...], year: int, by_state: bool) -> dict:
 @st.cache_data(show_spinner="Assembling state geometry…")
 def state_geometry(year: int) -> gpd.GeoDataFrame:
     """The year's state shapes, in the same order every year."""
-    return _stable_order({y: _state_shapes(y) for y in available_years()}, year, "statefp")
+    return stable_order({y: _state_shapes(y) for y in available_years()}, year, "statefp")
 
 
 @st.cache_data(show_spinner=False)
@@ -178,7 +188,7 @@ def _state_shapes(year: int) -> gpd.GeoDataFrame:
     shapes = _load_state_shapes()
     if shapes is not None and year in set(shapes["year"]):
         return shapes.loc[shapes["year"] == year, ["statefp", "geometry"]].reset_index(drop=True)
-    return dissolve_states(year_geometry(year))
+    return dissolve_states(_year_features(year))
 
 
 def dissolve_states(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -209,13 +219,13 @@ def state_geojson(year: int) -> dict:
     """State shapes as GeoJSON keyed like the county map (`fips` = state FIPS)."""
     states = state_geometry(year).rename(columns={"statefp": "fips"})
     states["name"] = states["fips"]
-    return _geojson(states[["fips", "name", "geometry"]])
+    return json.loads(snap(states[["fips", "name", "geometry"]]).to_json(drop_id=True))
 
 
 @st.cache_data(show_spinner=False)
 def year_geojson(year: int) -> dict:
     """Year geometry as a plain GeoJSON dict (computed once per year)."""
-    return _geojson(year_geometry(year))
+    return json.loads(year_geometry(year).to_json(drop_id=True))
 
 
 # Map coordinates are sent on a 0.001° grid (~110 m). Boundaries are already
@@ -223,9 +233,8 @@ def year_geojson(year: int) -> dict:
 COORD_GRID = 0.001
 
 
-def _geojson(gdf: gpd.GeoDataFrame) -> dict:
-    snapped = gdf.assign(geometry=shapely.set_precision(gdf.geometry.values, COORD_GRID))
-    return json.loads(snapped.to_json(drop_id=True))
+def snap(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    return gdf.assign(geometry=shapely.set_precision(gdf.geometry.values, COORD_GRID))
 
 
 # --------------------------------------------------------------------------- #

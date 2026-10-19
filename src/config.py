@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data" / "processed"
 PLACES_PATH = DATA_DIR / "places_county.parquet"
 COUNTIES_PATH = DATA_DIR / "counties.parquet"
+COUNTY_SHAPES_PATH = DATA_DIR / "county_shapes.parquet"  # map-ready county set per analysis year
 STATE_SHAPES_PATH = DATA_DIR / "state_shapes.parquet"  # counties dissolved per state and year
 FAVICON_PATH = ROOT / "assets" / "favicon.png"
 INTRO_PATH = ROOT / "assets" / "Intro.png"  # shown when the title logo is clicked

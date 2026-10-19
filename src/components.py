@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import pydeck as pdk
+from pydeck.bindings.json_tools import default_serialize
 import streamlit as st
 from PIL import Image
 
@@ -269,7 +270,7 @@ def render_lookup_result(
                 pct = int(round((year_all[m].dropna() <= v).mean() * 100))
                 flag = ""
                 if m in SENSORY_MEASURES:
-                    cutoff = percentile_cutoff(tuple(panel[m].astype(float)), 100 - top_pct)
+                    cutoff = percentile_cutoff(panel[m], 100 - top_pct)
                     flag = f", top {top_pct}%" if v >= cutoff else ""
                 st.progress(pct / 100, text=f"{MEASURE_LABELS[m]} {v:.1f}% ({_ordinal(pct)} pct{flag})")
             st.caption(f"Percentile among US counties in {year}; higher = more prevalent.")
@@ -374,20 +375,19 @@ def _hex_to_rgb(h: str, alpha: int = 255) -> list[int]:
     return [int(h[i : i + 2], 16) for i in (0, 2, 4)] + [alpha]
 
 
-@st.cache_data(show_spinner=False)
-def color_breaks(values: tuple[float, ...], classes: int) -> list[float]:
+# Not cached: the quantiles take ~1 ms, while hashing the values for a cache key took ~75 ms.
+def color_breaks(values: pd.Series, classes: int) -> list[float]:
     """Class breaks computed on the pooled (all-year) distribution so colours
     mean the same thing at every step of the time slider."""
-    arr = np.asarray(values, dtype=float)
+    arr = values.astype(float).to_numpy()
     arr = arr[~np.isnan(arr)]
     if arr.size == 0:
         return []
     return list(np.quantile(arr, np.linspace(0, 1, classes + 1)[1:-1]))
 
 
-@st.cache_data(show_spinner=False)
-def percentile_cutoff(values: tuple[float, ...], pct: int) -> float:
-    arr = np.asarray(values, dtype=float)
+def percentile_cutoff(values: pd.Series, pct: int) -> float:
+    arr = values.astype(float).to_numpy()
     arr = arr[~np.isnan(arr)]
     return float(np.percentile(arr, pct)) if arr.size else float("nan")
 
@@ -916,10 +916,11 @@ def open_profile_on_click(map_key: str, tab_key: str, tab_label: str) -> None:
 
 class CompactDeck(pdk.Deck):
     """pydeck pretty-prints its JSON (indent=2), which is ~70% whitespace for the county
-    map. Every year-slider step resends the whole spec, so send it compact."""
+    map. Every year-slider step resends the whole spec, so send it compact. Serialising
+    compact directly (same output) is ~3x faster than re-encoding pydeck's string."""
 
     def to_json(self) -> str:
-        return json.dumps(json.loads(super().to_json()), separators=(",", ":"))
+        return json.dumps(self, sort_keys=True, default=default_serialize, separators=(",", ":"))
 
 
 def render_map(
@@ -955,7 +956,7 @@ def render_sori_map(
     highlight: list[pdk.Layer] = (), unit: str = "counties",
     markers: dict[str, tuple[float, float]] | None = None, **map_kw,
 ) -> None:
-    breaks = color_breaks(tuple(panel[COMPOSITE].astype(float)), len(SEQUENTIAL_RAMP))
+    breaks = color_breaks(panel[COMPOSITE], len(SEQUENTIAL_RAMP))
     features = build_map_features(geojson, year_df, COMPOSITE, breaks, SEQUENTIAL_RAMP, selected_fips)
     render_map([_county_layer(features), *_marker_layer(features, markers or {})],
                view, pin, highlight, **map_kw)
@@ -980,14 +981,14 @@ def render_overlay_map(
     `year_df`); the state view passes counties carrying their state's values."""
     show_cog = OUTCOME_MEASURE in overlays
     breaks = (
-        color_breaks(tuple(panel[OUTCOME_MEASURE].astype(float)), len(COGNITION_RAMP))
+        color_breaks(panel[OUTCOME_MEASURE], len(COGNITION_RAMP))
         if show_cog else []
     )
     features = build_map_features(
         geojson, year_df, OUTCOME_MEASURE if show_cog else None, breaks, COGNITION_RAMP, selected_fips
     )
     cutoffs = {
-        m: percentile_cutoff(tuple(panel[m].astype(float)), 100 - top_pct) for m in SENSORY_MEASURES
+        m: percentile_cutoff(panel[m], 100 - top_pct) for m in SENSORY_MEASURES
     }
     pattern_counties = year_df if pattern_df is None else pattern_df
     pattern_fips = selected_fips if pattern_df is None else set(pattern_df["fips"])

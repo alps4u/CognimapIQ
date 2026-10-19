@@ -5,12 +5,13 @@ county boundaries, then writes:
 
     data/processed/places_county.parquet   tidy wide table, one row per county-year-value type
     data/processed/counties.parquet        county polygons (GeoParquet, EPSG:4326)
+    data/processed/county_shapes.parquet   map-ready county set per analysis year
     data/processed/state_shapes.parquet    counties dissolved per state and analysis year
 
 Run once (or whenever you want to refresh the snapshot):
 
     python scripts/preprocess.py
-    python scripts/preprocess.py --states-only   # rebuild state shapes from the files above
+    python scripts/preprocess.py --shapes-only   # rebuild the two shape files from the files above
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from src.data_loader import county_features, dissolve_states  # noqa: E402
+from src.data_loader import county_features, dissolve_states, snap, stable_order  # noqa: E402
 
 RAW_DIR = ROOT / "data" / "raw"
 OUT_DIR = ROOT / "data" / "processed"
@@ -180,26 +181,31 @@ def build_counties() -> gpd.GeoDataFrame:
     return gdf
 
 
-def build_state_shapes(counties: gpd.GeoDataFrame, places: pd.DataFrame) -> gpd.GeoDataFrame:
-    """One dissolved shape per state for each analysis year (each year's county set
-    differs, e.g. Connecticut). The app would otherwise spend ~4 s on this at start-up."""
+def write_shapes(counties: gpd.GeoDataFrame, places: pd.DataFrame) -> None:
+    """Map shapes per analysis year (each year's county set differs, e.g. Connecticut),
+    which the app would otherwise assemble at start-up (~4 s states, ~1 s counties):
+
+    county_shapes: the year's counties in a feature order shared by all years, snapped
+                   to the map's coordinate grid, as the county map draws them.
+    state_shapes:  the year's counties dissolved into one shape per state.
+    """
     places = places.assign(fips=places["fips"].astype(str))
-    frames = [dissolve_states(county_features(counties, places, y)).assign(year=y)
-              for y in sorted(places["year"].unique())]
-    return gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), crs=counties.crs)
-
-
-def write_state_shapes(counties: gpd.GeoDataFrame, places: pd.DataFrame) -> None:
-    states = build_state_shapes(counties, places)
-    path = OUT_DIR / "state_shapes.parquet"
-    states.to_parquet(path, index=False)
-    print(f"  wrote {path.relative_to(ROOT)} ({len(states):,} features)")
+    by_year = {y: county_features(counties, places, y) for y in sorted(places["year"].unique())}
+    shapes = {
+        "county_shapes": [snap(stable_order(by_year, y, "fips")).assign(year=y) for y in by_year],
+        "state_shapes": [dissolve_states(g).assign(year=y) for y, g in by_year.items()],
+    }
+    for name, frames in shapes.items():
+        gdf = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), crs=counties.crs)
+        path = OUT_DIR / f"{name}.parquet"
+        gdf.to_parquet(path, index=False)
+        print(f"  wrote {path.relative_to(ROOT)} ({len(gdf):,} features)")
 
 
 def main() -> int:
-    if "--states-only" in sys.argv:
-        print("State shapes")
-        write_state_shapes(gpd.read_parquet(OUT_DIR / "counties.parquet"),
+    if "--shapes-only" in sys.argv:
+        print("County and state shapes")
+        write_shapes(gpd.read_parquet(OUT_DIR / "counties.parquet"),
                            pd.read_parquet(OUT_DIR / "places_county.parquet"))
         return 0
     RAW_DIR.mkdir(parents=True, exist_ok=True)
@@ -221,8 +227,8 @@ def main() -> int:
     if missing:
         print(f"  note: {len(missing)} PLACES FIPS without boundary: {sorted(missing)[:10]}")
 
-    print("[3/3] State shapes")
-    write_state_shapes(counties, places)
+    print("[3/3] County and state shapes")
+    write_shapes(counties, places)
     return 0
 
 
