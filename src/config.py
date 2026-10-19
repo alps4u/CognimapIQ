@@ -19,6 +19,7 @@ HC_SITES_PATH = DATA_DIR / "hc_sites.parquet"
 HC_UDS_PATH = DATA_DIR / "hc_uds.parquet"
 NH_FACILITIES_PATH = DATA_DIR / "nh_facilities.parquet"
 SENIOR_COGNITION_PATH = DATA_DIR / "senior_cognition.parquet"
+POLICY_EVENTS_PATH = DATA_DIR / "policy_events.parquet"  # state milestones (scripts/preprocess_policy.py)
 
 CRS = "EPSG:4326"
 
@@ -162,9 +163,9 @@ class PolicyEvent:
     detail: str
 
 
-# Policy and evidence milestones shown on the longitudinal timeline. These are
-# national (US) reference events for the PoC; swap for provincial / health-region
-# interventions when migrating to Canadian data.
+# National (US) policy and evidence milestones, numbered on the trend chart. State
+# milestones come from policy_events.parquet and appear only in the table; swap
+# both for provincial / health-region interventions when migrating to Canadian data.
 POLICY_EVENTS = [
     PolicyEvent(
         "2020-07-30", "Evidence",
@@ -204,4 +205,12 @@ DOMAIN_COLORS = {
     "Mastication": MEASURE_COLORS["TEETHLOST"],
     "Cognition": MEASURE_COLORS["COGNITION"],
     "Evidence": INK_MUTED,
+}
+
+POLICY_SOURCES = {
+    "kff": ("KFF State Health Facts: Medicaid expansion",
+            "https://www.kff.org/affordable-care-act/state-indicator/"
+            "state-activity-around-expanding-medicaid-under-the-affordable-care-act/"),
+    "dental": ("CHCS / CareQuest / ADA HPI Medicaid Adult Dental Coverage Checker",
+               "https://www.carequest.org/coveragechecker"),
 }

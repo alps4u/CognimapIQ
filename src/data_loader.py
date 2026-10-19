@@ -22,6 +22,7 @@ from src.config import (
     MEDICAID_PATH,
     NH_FACILITIES_PATH,
     PLACES_PATH,
+    POLICY_EVENTS_PATH,
     SENIOR_COGNITION_PATH,
 )
 
@@ -226,6 +227,14 @@ def load_nh_facilities() -> pd.DataFrame:
 def load_senior_cognition() -> pd.DataFrame:
     _require(SENIOR_COGNITION_PATH)
     return pd.read_parquet(SENIOR_COGNITION_PATH)
+
+
+@st.cache_data(show_spinner=False)
+def load_policy_events() -> pd.DataFrame:
+    """State policy milestones; empty when scripts/preprocess_policy.py has not run."""
+    if not POLICY_EVENTS_PATH.exists():
+        return pd.DataFrame(columns=["date", "scope", "state", "domain", "title", "detail", "source"])
+    return pd.read_parquet(POLICY_EVENTS_PATH)
 
 
 @st.cache_data(show_spinner=False)

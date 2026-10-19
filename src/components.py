@@ -53,6 +53,7 @@ from src.config import (
     PATTERN_TOP_DEFAULT,
     PATTERN_TOP_SHARES,
     POLICY_EVENTS,
+    POLICY_SOURCES,
     SENSORY_MEASURES,
     SEQUENTIAL_RAMP,
     UDS_SERVICES,
@@ -1337,12 +1338,38 @@ def coefficient_chart(fit: ModelFit) -> go.Figure:
 # --------------------------------------------------------------------------- #
 # Tables & text blocks
 # --------------------------------------------------------------------------- #
-def render_policy_timeline() -> None:
-    rows = [
-        {"#": i + 1, "Date": ev.date, "Domain": ev.domain, "Milestone": ev.title, "Detail": ev.detail}
+def render_policy_timeline(state_events: pd.DataFrame, state_names: dict[str, str]) -> None:
+    """National milestones (numbered as on the trend chart) plus the given state events."""
+    national = pd.DataFrame([
+        {"#": i + 1, "Date": ev.date, "Scope": "US", "Jurisdiction": "United States",
+         "Domain": ev.domain, "Milestone": ev.title, "Detail": ev.detail, "Source": None}
         for i, ev in enumerate(POLICY_EVENTS)
-    ]
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    ])
+    states = pd.DataFrame({
+        "#": None, "Date": state_events["date"], "Scope": state_events["scope"],
+        "Jurisdiction": state_events["state"].map(state_names).fillna(state_events["state"]),
+        "Domain": state_events["domain"], "Milestone": state_events["title"],
+        "Detail": state_events["detail"], "Source": state_events["source"],
+    })
+    rows = pd.concat([national, states], ignore_index=True).sort_values("Date", kind="stable")
+    # State rows have no chart marker. st.dataframe prints any null as "None", so use text.
+    rows["#"] = rows["#"].map(lambda n: "" if pd.isna(n) else str(int(n)))
+    st.dataframe(
+        rows, hide_index=True, width="stretch",
+        column_config={
+            "#": st.column_config.TextColumn(width=38,  # half of "small" (75 px)
+                                             help="Marker number on the trend chart (US milestones)."),
+            "Date": st.column_config.TextColumn(help="Effective date; YYYY-MM where the source gives only the month."),
+            "Scope": st.column_config.TextColumn(help="US = federal or national evidence; State = state Medicaid policy."),
+            "Domain": st.column_config.TextColumn(
+                help="Vision / Hearing / Mastication / Cognition / Evidence, or Access for "
+                     "coverage changes that are not sensory-specific (Medicaid expansion)."),
+            "Detail": st.column_config.TextColumn(width="large"),
+            "Source": st.column_config.LinkColumn(display_text="link"),
+        },
+    )
+    st.caption("State sources: " + " · ".join(f"[{name}]({url})" for name, url in POLICY_SOURCES.values())
+               + ". No county-level policy dataset is available from these sources.")
 
 
 def render_model_table(fit: ModelFit) -> None:

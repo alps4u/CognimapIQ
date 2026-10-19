@@ -275,8 +275,13 @@ if tab_time.open:  # hidden tabs are skipped; see KEEP_WIDGET_STATE
                 width="stretch",
             )
         st.markdown("##### Policy & evidence milestones")
-        st.caption("Numbered markers on the trend chart. Dotted lines are coloured by sensory domain.")
-        ui.render_policy_timeline()
+        state_events = dl.load_policy_events()
+        if controls.states:
+            state_events = state_events[state_events["state"].isin(controls.states)]
+        st.caption(f"US milestones are numbered markers on the trend chart above, with dotted lines coloured by "
+                   f"sensory domain. State Medicaid milestones for {region_label} are listed in the table only.")
+        ui.render_policy_timeline(state_events,
+                                  dict(zip(dl.state_options()["state"], dl.state_options()["state_name"])))
 
         if len(years) > 1:
             st.markdown(f"##### Largest increases in {COMPOSITE_LABEL}, {years[0]} → {years[-1]}")
