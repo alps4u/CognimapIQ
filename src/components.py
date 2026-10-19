@@ -140,6 +140,9 @@ def _run_lookup() -> None:
     except dl.GeocodeError as exc:
         match, error = None, str(exc)
     st.session_state["lookup"] = {"match": match, "error": error}
+    if match is not None:
+        # The state map has no counties to click, so show the looked-up county's own map.
+        st.session_state["map_geo"] = "county"
 
 
 def _reset_overlays() -> None:
