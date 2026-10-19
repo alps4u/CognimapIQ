@@ -29,8 +29,8 @@ PLAY_INTERVAL_S = 1.6
 # Only the open tab is built on each run (st.tabs with on_change="rerun" exposes
 # `.open`), which saves ~1 s per rerun. Streamlit drops the state of widgets that
 # weren't drawn, so the hidden tabs' picks are re-stored here to survive a tab switch.
-KEEP_WIDGET_STATE = ["profile_state", "profile_fips", "uds_service", "uds_org", "top_n",
-                     *(f"red_{m}" for m in SENSORY_MEASURES)]
+KEEP_WIDGET_STATE = ["map_geo", "profile_state", "profile_fips", "uds_service", "uds_org",
+                     "top_n", *(f"red_{m}" for m in SENSORY_MEASURES)]
 for _k in KEEP_WIDGET_STATE:
     if _k in st.session_state:
         st.session_state[_k] = st.session_state[_k]
@@ -67,6 +67,18 @@ def plan_shares() -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def nursing_home_summaries() -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     return model.nh_summaries(dl.load_nh_facilities(), dl.load_senior_cognition())
+
+
+@st.cache_resource(show_spinner=False)
+def warm_profile(_panel: pd.DataFrame) -> None:
+    """Pay the County profile's one-off costs (care-access summaries, county shapes,
+    Plotly's lazily loaded validators, pandas Styler) once per server process."""
+    import pandas.io.formats.style  # noqa: F401  (loads jinja2 for the flagged tables)
+
+    county_access()
+    dl.year_geometry(dl.available_years()[-1])
+    one_county = _panel[_panel["fips"] == _panel["fips"].iloc[0]]
+    ui.trend_chart(model.national_trend(one_county), int(one_county["year"].max()), "").to_json()
 
 
 def county_access() -> ui.CountyAccess | None:
@@ -193,60 +205,61 @@ tab_map, tab_profile, tab_time, tab_model, tab_table = st.tabs(
 # --------------------------------------------------------------------------- #
 # Primary view — spatial map
 # --------------------------------------------------------------------------- #
-with tab_map:
-    overlay = controls.map_mode == "overlay"
-    title_col, geo_col = st.columns([3, 1], vertical_alignment="bottom")
-    title_col.markdown(
-        f"#### {'Cognitive & sensory overlay' if overlay else COMPOSITE_LABEL} ({year})"
-    )
-    by_state = ui.render_geography_toggle(geo_col) == "state"
-    # A looked-up address zooms to its state unless the user has chosen a region.
-    if pin and pin["state"] and not filtered:
-        view = ui.view_state(set(year_all.loc[year_all["state"] == pin["state"], "fips"]), True)
-    else:
-        view = ui.view_state(selected_fips, filtered)
-    highlight = ui.highlight_layers(year, selected_fips, filtered, pin)
-    if by_state:
-        states = state_panel(VALUE_TYPE, tuple(sorted(weights.items())))
-        geojson, map_panel = dl.state_geojson(year), states
-        map_year = states[states["year"] == year]
-        map_selected = {f[:2] for f in selected_fips}
-        # States aren't profiled, so the state map has no click-through.
-        map_kw = {"key": "risk_map_state", "unit": "states", "markers": dl.small_state_points(year)}
-    else:
-        geojson, map_panel, map_year, map_selected = dl.year_geojson(year), panel, year_all, selected_fips
-        # Clicking a county opens it in the County profile tab.
-        map_key = f"risk_map_{st.session_state.get('_map_nonce', 0)}"
-        map_kw = {"key": map_key,
-                  "on_click": partial(ui.open_profile_on_click, map_key, "main_tab", PROFILE_TAB)}
-    if overlay:
-        if not controls.overlays:
-            st.info("Select at least one layer in the sidebar.")
-        if by_state:
-            # Patterns are drawn over each selected county, carrying its state's values.
-            values = map_year.set_index("fips")[[*SENSORY_MEASURES]]
-            counties = year_all.loc[year_all["fips"].isin(selected_fips), ["fips", "lat", "lon"]]
-            map_kw["pattern_df"] = counties.join(values, on=counties["fips"].str[:2])
-        ui.render_overlay_map(geojson, map_year, map_panel, map_selected, view,
-                              controls.overlays, controls.pattern_top_pct, pin, highlight, **map_kw)
-    else:
-        ui.render_sori_map(geojson, map_year, map_panel, map_selected, view, pin, highlight, **map_kw)
-
-    teeth_year = year_all["teethlost_source_year"].dropna()
-    if len(teeth_year) and int(teeth_year.iloc[0]) != year:
-        st.caption(
-            f"Complete tooth loss is surveyed every two years; {year} uses "
-            f"{int(teeth_year.iloc[0])} estimates."
+if tab_map.open:  # hidden tabs are skipped; see KEEP_WIDGET_STATE
+    with tab_map:
+        overlay = controls.map_mode == "overlay"
+        title_col, geo_col = st.columns([3, 1], vertical_alignment="bottom")
+        title_col.markdown(
+            f"#### {'Cognitive & sensory overlay' if overlay else COMPOSITE_LABEL} ({year})"
         )
+        by_state = ui.render_geography_toggle(geo_col) == "state"
+        # A looked-up address zooms to its state unless the user has chosen a region.
+        if pin and pin["state"] and not filtered:
+            view = ui.view_state(set(year_all.loc[year_all["state"] == pin["state"], "fips"]), True)
+        else:
+            view = ui.view_state(selected_fips, filtered)
+        highlight = ui.highlight_layers(year, selected_fips, filtered, pin)
+        if by_state:
+            states = state_panel(VALUE_TYPE, tuple(sorted(weights.items())))
+            geojson, map_panel = dl.state_geojson(year), states
+            map_year = states[states["year"] == year]
+            map_selected = {f[:2] for f in selected_fips}
+            # States aren't profiled, so the state map has no click-through.
+            map_kw = {"key": "risk_map_state", "unit": "states", "markers": dl.small_state_points(year)}
+        else:
+            geojson, map_panel, map_year, map_selected = dl.year_geojson(year), panel, year_all, selected_fips
+            # Clicking a county opens it in the County profile tab.
+            map_key = f"risk_map_{st.session_state.get('_map_nonce', 0)}"
+            map_kw = {"key": map_key,
+                      "on_click": partial(ui.open_profile_on_click, map_key, "main_tab", PROFILE_TAB)}
+        if overlay:
+            if not controls.overlays:
+                st.info("Select at least one layer in the sidebar.")
+            if by_state:
+                # Patterns are drawn over each selected county, carrying its state's values.
+                values = map_year.set_index("fips")[[*SENSORY_MEASURES]]
+                counties = year_all.loc[year_all["fips"].isin(selected_fips), ["fips", "lat", "lon"]]
+                map_kw["pattern_df"] = counties.join(values, on=counties["fips"].str[:2])
+            ui.render_overlay_map(geojson, map_year, map_panel, map_selected, view,
+                                  controls.overlays, controls.pattern_top_pct, pin, highlight, **map_kw)
+        else:
+            ui.render_sori_map(geojson, map_year, map_panel, map_selected, view, pin, highlight, **map_kw)
 
-    w_txt = ", ".join(f"{MEASURE_LABELS[m]} {weights[m]:.0%}" for m in SENSORY_MEASURES)
-    st.caption(f"{COMPOSITE_SHORT} weights ({controls.weight_mode.lower()}): {w_txt}")
-    if by_state:
-        st.caption("Switch to County to click a county and open its profile.")
-    else:
-        st.caption("Click a county to open it in the County profile tab.")
-    # Right after the map, so the zoom box doesn't wait for the other tabs on a cold start.
-    ui.install_map_scripts()
+        teeth_year = year_all["teethlost_source_year"].dropna()
+        if len(teeth_year) and int(teeth_year.iloc[0]) != year:
+            st.caption(
+                f"Complete tooth loss is surveyed every two years; {year} uses "
+                f"{int(teeth_year.iloc[0])} estimates."
+            )
+
+        w_txt = ", ".join(f"{MEASURE_LABELS[m]} {weights[m]:.0%}" for m in SENSORY_MEASURES)
+        st.caption(f"{COMPOSITE_SHORT} weights ({controls.weight_mode.lower()}): {w_txt}")
+        if by_state:
+            st.caption("Switch to County to click a county and open its profile.")
+        else:
+            st.caption("Click a county to open it in the County profile tab.")
+        # Right after the map, so the zoom box doesn't wait for the other tabs on a cold start.
+        ui.install_map_scripts()
 
 # --------------------------------------------------------------------------- #
 # County profile — sensory burden and access to preventative care
@@ -363,6 +376,11 @@ st.caption(
     "Prototype (PoC) built on CDC PLACES as a stand-in for Canadian longitudinal data "
     "(CCHS, CLSA). Health-region boundaries will replace US counties after migration."
 )
+
+# After the map has been sent, so it doesn't delay the first screen (~0.8 s on a cold
+# start); the first County profile open then takes ~0.6 s instead of ~1.3 s.
+if tab_map.open:
+    warm_profile(panel)
 
 # Continue timeline playback after the page has rendered.
 if st.session_state.get("playing"):
