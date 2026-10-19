@@ -451,7 +451,7 @@ MAP_WIDTH_PX = 1040  # approximate main-column width on a wide layout
 # Hawaii stay a pan away (fitting them would shrink the lower 48 by half).
 CONTIGUOUS_US_BOUNDS = (-124.8, 24.5, -66.9, 49.4)
 US_VIEW_PADDING = 0.03
-US_DEFAULT_PCT = 80  # the map opens at this scale, where 100% = contiguous US fitted
+US_DEFAULT_PCT = 100  # the map opens at this scale, where 100% = contiguous US fitted
 
 
 def _mercator_y(lat: float) -> float:
