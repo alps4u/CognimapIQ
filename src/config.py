@@ -83,7 +83,7 @@ DOT_SPACING_PX = (7, 4)
 DOT_SPACING_ZOOMS = (3.5, 7.0)
 # Patterns mark counties in the top N% of each sensory measure (sidebar choice).
 PATTERN_TOP_SHARES = [10, 20, 25, 30, 50]
-PATTERN_TOP_DEFAULT = 25
+PATTERN_TOP_DEFAULT = 10
 NO_DATA_COLOR = "#d9d8d2"
 
 # Fixed categorical order (identity follows the measure, never its rank). Charts reuse the

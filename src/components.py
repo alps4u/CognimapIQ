@@ -445,12 +445,13 @@ def build_map_features(
 
 
 DECK_WORLD_PX = 512  # deck.gl world size at zoom 0
-MAP_HEIGHT_PX = 740  # tall enough that the contiguous US fills a wide map at full size
+MAP_HEIGHT_PX = 666  # 90% of the 740 px at which the contiguous US fills a wide map
 MAP_WIDTH_PX = 1040  # approximate main-column width on a wide layout
 # Contiguous US (lon/lat): the default view fills the map with it; Alaska and
 # Hawaii stay a pan away (fitting them would shrink the lower 48 by half).
 CONTIGUOUS_US_BOUNDS = (-124.8, 24.5, -66.9, 49.4)
 US_VIEW_PADDING = 0.03
+US_DEFAULT_PCT = 80  # the map opens at this scale, where 100% = contiguous US fitted
 
 
 def _mercator_y(lat: float) -> float:
@@ -477,7 +478,9 @@ def _fit_bounds(bounds: tuple[float, float, float, float], padding: float) -> pd
 
 
 # The browser refits this to the map's real width (see MAP_ZOOM_JS).
-US_VIEW = _fit_bounds(CONTIGUOUS_US_BOUNDS, US_VIEW_PADDING)
+_US_FIT = _fit_bounds(CONTIGUOUS_US_BOUNDS, US_VIEW_PADDING)
+US_VIEW = pdk.ViewState(latitude=_US_FIT.latitude, longitude=_US_FIT.longitude,
+                        zoom=_US_FIT.zoom + float(np.log2(US_DEFAULT_PCT / 100)))
 
 
 def view_state(selected_fips: set[str], filtered: bool, padding: float = 0.08) -> pdk.ViewState:
@@ -777,6 +780,11 @@ MAP_ZOOM_JS = r"""
     const zoom = Math.log2(Math.min(w * (1 - 2 * p) / dx, h * (1 - 2 * p) / (yb - yt)));
     return { latitude: unmercY((yt + yb) / 2), longitude: (w0 + e0) / 2, zoom };
   };
+  // The view the map opens at: the fit above scaled to CFG.defaultPct.
+  const defaultView = (w, h) => {
+    const fit = fitView(w, h);
+    return { ...fit, zoom: fit.zoom + Math.log2(CFG.defaultPct / 100) };
+  };
   const findDeck = (root) => {
     const canvas = root.querySelector("canvas");
     const key = canvas && Object.keys(canvas).find((k) => k.startsWith("__reactFiber$"));
@@ -817,9 +825,10 @@ MAP_ZOOM_JS = r"""
     // Python's default view arrived (first load or after a filter reset): refit it to
     // the real width, and keep refitting on resize while the user hasn't moved it.
     const atDefault = same(vs, CFG.base) || (el.__cogFit && same(vs, el.__cogFit));
-    if (atDefault && !same(vs, fit)) {
-      el.__cogFit = fit;
-      setView(deck, fit);
+    const home = defaultView(w, h);
+    if (atDefault && !same(vs, home)) {
+      el.__cogFit = home;
+      setView(deck, home);
       return;
     }
     let box = buttons.querySelector(".cog-zoom-pct");
@@ -886,7 +895,7 @@ def install_map_scripts() -> None:
     """Tooltip placement plus the zoom percentage box (see the scripts above)."""
     cfg = {
         "selector": '.st-key-risk_map_box [data-testid="stDeckGlJsonChart"]',
-        "bounds": CONTIGUOUS_US_BOUNDS, "padding": US_VIEW_PADDING,
+        "bounds": CONTIGUOUS_US_BOUNDS, "padding": US_VIEW_PADDING, "defaultPct": US_DEFAULT_PCT,
         "base": {"latitude": US_VIEW.latitude, "longitude": US_VIEW.longitude, "zoom": US_VIEW.zoom},
     }
     # One <script> element, and no "<tag"-like text inside it: st.html's sanitizer
