@@ -11,7 +11,7 @@ python -m venv .venv
 .venv\Scripts\activate               # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
 
-python scripts/preprocess.py         # CDC PLACES + county boundaries (about 1 minute)
+python scripts/preprocess.py         # CDC PLACES, county boundaries and state shapes (about 1 minute)
 python scripts/preprocess_access.py  # care-access and nursing home data (a few minutes, ~470 MB download)
 python scripts/preprocess_policy.py  # state policy milestones (seconds)
 streamlit run app.py                 # http://localhost:8501

@@ -24,6 +24,7 @@ from src.config import (
     PLACES_PATH,
     POLICY_EVENTS_PATH,
     SENIOR_COGNITION_PATH,
+    STATE_SHAPES_PATH,
 )
 
 
@@ -103,6 +104,10 @@ def year_geometry(year: int) -> gpd.GeoDataFrame:
 
 @st.cache_data(show_spinner=False)
 def _year_features(year: int) -> gpd.GeoDataFrame:
+    return county_features(load_counties(), load_places(), year)
+
+
+def county_features(counties: gpd.GeoDataFrame, places: pd.DataFrame, year: int) -> gpd.GeoDataFrame:
     """Boundary set matching the FIPS scheme used by one analysis year.
 
     Boundaries changed during the study period (e.g. Connecticut moved from
@@ -111,8 +116,8 @@ def _year_features(year: int) -> gpd.GeoDataFrame:
     not overlap a feature with data, so retired and replacement units never
     stack on the map.
     """
-    gdf = load_counties()
-    fips_with_data = set(load_places().loc[lambda d: d["year"] == year, "fips"])
+    gdf = counties
+    fips_with_data = set(places.loc[lambda d: d["year"] == year, "fips"])
     has_data = gdf["fips"].isin(fips_with_data)
     with_data = gdf[has_data]
     candidates = gdf[~has_data & gdf["current"]]
@@ -163,9 +168,21 @@ def state_geometry(year: int) -> gpd.GeoDataFrame:
 
 
 @st.cache_data(show_spinner=False)
+def _load_state_shapes() -> gpd.GeoDataFrame | None:
+    return gpd.read_parquet(STATE_SHAPES_PATH) if STATE_SHAPES_PATH.exists() else None
+
+
+@st.cache_data(show_spinner=False)
 def _state_shapes(year: int) -> gpd.GeoDataFrame:
-    """The year's counties dissolved into one shape per state (`statefp`)."""
-    gdf = year_geometry(year)
+    """Precomputed by scripts/preprocess.py; dissolving here takes ~1 s per year."""
+    shapes = _load_state_shapes()
+    if shapes is not None and year in set(shapes["year"]):
+        return shapes.loc[shapes["year"] == year, ["statefp", "geometry"]].reset_index(drop=True)
+    return dissolve_states(year_geometry(year))
+
+
+def dissolve_states(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Counties dissolved into one shape per state (`statefp`)."""
     # County edges don't meet exactly, so a plain dissolve leaves seam lines inside
     # each state. Grow-union-shrink closes the gaps; dropping holes removes slivers.
     eps = 0.005  # degrees (~500 m)
@@ -192,13 +209,23 @@ def state_geojson(year: int) -> dict:
     """State shapes as GeoJSON keyed like the county map (`fips` = state FIPS)."""
     states = state_geometry(year).rename(columns={"statefp": "fips"})
     states["name"] = states["fips"]
-    return json.loads(states[["fips", "name", "geometry"]].to_json(drop_id=True))
+    return _geojson(states[["fips", "name", "geometry"]])
 
 
 @st.cache_data(show_spinner=False)
 def year_geojson(year: int) -> dict:
     """Year geometry as a plain GeoJSON dict (computed once per year)."""
-    return json.loads(year_geometry(year).to_json(drop_id=True))
+    return _geojson(year_geometry(year))
+
+
+# Map coordinates are sent on a 0.001° grid (~110 m). Boundaries are already
+# simplified at 0.005°, so this is invisible, and it trims the county map payload.
+COORD_GRID = 0.001
+
+
+def _geojson(gdf: gpd.GeoDataFrame) -> dict:
+    snapped = gdf.assign(geometry=shapely.set_precision(gdf.geometry.values, COORD_GRID))
+    return json.loads(snapped.to_json(drop_id=True))
 
 
 # --------------------------------------------------------------------------- #

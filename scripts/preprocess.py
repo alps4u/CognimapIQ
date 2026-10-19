@@ -5,10 +5,12 @@ county boundaries, then writes:
 
     data/processed/places_county.parquet   tidy wide table, one row per county-year-value type
     data/processed/counties.parquet        county polygons (GeoParquet, EPSG:4326)
+    data/processed/state_shapes.parquet    counties dissolved per state and analysis year
 
 Run once (or whenever you want to refresh the snapshot):
 
     python scripts/preprocess.py
+    python scripts/preprocess.py --states-only   # rebuild state shapes from the files above
 """
 
 from __future__ import annotations
@@ -22,6 +24,9 @@ import pandas as pd
 import requests
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from src.data_loader import county_features, dissolve_states  # noqa: E402
+
 RAW_DIR = ROOT / "data" / "raw"
 OUT_DIR = ROOT / "data" / "processed"
 
@@ -175,17 +180,38 @@ def build_counties() -> gpd.GeoDataFrame:
     return gdf
 
 
+def build_state_shapes(counties: gpd.GeoDataFrame, places: pd.DataFrame) -> gpd.GeoDataFrame:
+    """One dissolved shape per state for each analysis year (each year's county set
+    differs, e.g. Connecticut). The app would otherwise spend ~4 s on this at start-up."""
+    places = places.assign(fips=places["fips"].astype(str))
+    frames = [dissolve_states(county_features(counties, places, y)).assign(year=y)
+              for y in sorted(places["year"].unique())]
+    return gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), crs=counties.crs)
+
+
+def write_state_shapes(counties: gpd.GeoDataFrame, places: pd.DataFrame) -> None:
+    states = build_state_shapes(counties, places)
+    path = OUT_DIR / "state_shapes.parquet"
+    states.to_parquet(path, index=False)
+    print(f"  wrote {path.relative_to(ROOT)} ({len(states):,} features)")
+
+
 def main() -> int:
+    if "--states-only" in sys.argv:
+        print("State shapes")
+        write_state_shapes(gpd.read_parquet(OUT_DIR / "counties.parquet"),
+                           pd.read_parquet(OUT_DIR / "places_county.parquet"))
+        return 0
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("[1/2] CDC PLACES county measures")
+    print("[1/3] CDC PLACES county measures")
     places = build_places()
     places_path = OUT_DIR / "places_county.parquet"
     places.to_parquet(places_path, index=False)
     print(f"  wrote {places_path.relative_to(ROOT)} ({len(places):,} rows)")
 
-    print("[2/2] County boundaries")
+    print("[2/3] County boundaries")
     counties = build_counties()
     counties_path = OUT_DIR / "counties.parquet"
     counties.to_parquet(counties_path, index=False)
@@ -194,6 +220,9 @@ def main() -> int:
     missing = set(places["fips"]) - set(counties["fips"])
     if missing:
         print(f"  note: {len(missing)} PLACES FIPS without boundary: {sorted(missing)[:10]}")
+
+    print("[3/3] State shapes")
+    write_state_shapes(counties, places)
     return 0
 
 
