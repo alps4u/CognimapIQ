@@ -1339,6 +1339,33 @@ def coefficient_chart(fit: ModelFit) -> go.Figure:
 # --------------------------------------------------------------------------- #
 # Tables & text blocks
 # --------------------------------------------------------------------------- #
+# Policy source links open in a centred popup window rather than a new tab. Link
+# cells in st.dataframe call window.open(url, "_blank", ...), so that call is
+# rerouted for the listed URLs; caption links (anchors) are caught on click.
+SOURCE_POPUP_JS = r"""
+(() => {
+  window.__cognimapPopupUrls = new Set(__URLS__);
+  if (window.__cognimapPopup) return;
+  window.__cognimapPopup = true;
+  const nativeOpen = window.open.bind(window);
+  const popup = (url) => {
+    const w = Math.min(1100, screen.availWidth - 80), h = Math.min(800, screen.availHeight - 80);
+    const left = Math.round((screen.availWidth - w) / 2), top = Math.round((screen.availHeight - h) / 2);
+    return nativeOpen(url, "cognimapSource",
+      `popup,width=${w},height=${h},left=${left},top=${top},noopener,noreferrer`);
+  };
+  window.open = (url, target, features) => {
+    if (typeof url === "string" && window.__cognimapPopupUrls.has(url)) return popup(url);
+    return nativeOpen(url, target, features);
+  };
+  document.addEventListener("click", (e) => {
+    const a = e.target.closest && e.target.closest("a[href]");
+    if (a && window.__cognimapPopupUrls.has(a.href)) { e.preventDefault(); popup(a.href); }
+  }, true);
+})();
+"""
+
+
 def render_policy_timeline(state_events: pd.DataFrame, state_names: dict[str, str]) -> None:
     """National milestones (numbered as on the trend chart) plus the given state events."""
     national = pd.DataFrame([
@@ -1366,11 +1393,15 @@ def render_policy_timeline(state_events: pd.DataFrame, state_names: dict[str, st
                 help="Vision / Hearing / Mastication / Cognition / Evidence, or Access for "
                      "coverage changes that are not sensory-specific (Medicaid expansion)."),
             "Detail": st.column_config.TextColumn(width="large"),
-            "Source": st.column_config.LinkColumn(display_text="link"),
+            "Source": st.column_config.LinkColumn(display_text="link", help="Opens the source in a popup window."),
         },
     )
     st.caption("State sources: " + " · ".join(f"[{name}]({url})" for name, url in POLICY_SOURCES.values())
                + ". No county-level policy dataset is available from these sources.")
+    urls = sorted({*rows["Source"].dropna(), *(url for _, url in POLICY_SOURCES.values())})
+    js = SOURCE_POPUP_JS.replace("__URLS__", json.dumps(urls))
+    assert not re.search(r"<[/\w!]", js), "markup-like text in popup script"  # see install_map_scripts
+    st.html(f"<script>{js}</script>", unsafe_allow_javascript=True)
 
 
 def render_model_table(fit: ModelFit) -> None:

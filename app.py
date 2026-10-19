@@ -362,7 +362,7 @@ if tab_table.open:  # hidden tabs are skipped; see KEEP_WIDGET_STATE
     with tab_table:
         t1, t2 = st.columns([3, 1], vertical_alignment="bottom")
         t1.markdown(f"#### Intervention priority in {region_label} ({year})")
-        top_n = t2.selectbox("Show Top", [25, 50, 100, 250, 500], index=1, key="top_n")
+        top_n = t2.selectbox("Show Top", [25, 50, 100, 250, 500], index=0, key="top_n")
         ui.render_priority_table(year_df, top_n)
         export = year_df.drop(columns=[c for c in year_df.columns if c.startswith("z_")])
         st.download_button(
